@@ -13,59 +13,347 @@ class Spotify {
 		this.CurrentUser := new user(JSON.load(this.Util.CustomCall("GET", "me")), this, true)
 		this.Users := new Users(this)
 	}
+
+	class PKCE {
+        class Crypto {
+            static BCRYPT_RNG_ALG_HANDLE := 0x00000081
+            static hHeap := DllCall("kernel32.dll\GetProcessHeap")
+
+            Allocate(Size) {
+                return DllCall("kernel32.dll\HeapAlloc", "Ptr", this.hHeap, "UInt", 0, "Ptr", Size, "Ptr")
+            }
+
+            Free(Ptr) {
+                DllCall("kernel32.dll\HeapFree", "Ptr", this.hHeap, "UInt", 0, "Ptr", Ptr)
+            }
+
+            GenerateRandomString(Length) {
+				local Buffer
+
+                VarSetCapacity(Buffer, Length, 0)
+                DllCall("bcrypt.dll\BCryptGenRandom", "Ptr", this.BCRYPT_RNG_ALG_HANDLE, "Ptr", &Buffer, "UInt", Length, "UInt", 0)
+
+                Result := ""
+
+                loop, % Length {
+                    Value := NumGet(&Buffer + 0, A_Index - 1, "UChar")
+
+                    Result .= SubStr("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789", Mod(Value, 62), 1)
+                }
+
+                return Result
+            }
+
+            static BCRYPT_SHA256_ALG_HANDLE := 0x00000041
+
+            SHA2_256(pInput, InputSize) {
+                DllCall("bcrypt.dll\BCryptCreateHash"
+                    , "Ptr", this.BCRYPT_SHA256_ALG_HANDLE
+                    , "Ptr*", hHash
+                    , "Ptr", 0, "Ptr", 0
+                    , "Ptr", 0, "Ptr", 0, "UInt", 0)
+
+                DllCall("bcrypt.dll\BCryptHashData"
+                    , "Ptr", hHash
+                    , "Ptr", pInput
+                    , "UInt", InputSize
+                    , "UInt", 0)
+                
+                pResult := this.Allocate(32)
+                DllCall("bcrypt.dll\BCryptFinishHash"
+                    , "Ptr", hHash
+                    , "Ptr", pResult
+                    , "UInt", 32
+                    , "UInt", 0)
+
+                DllCall("bcrypt.dll\BCryptDestroyHash", "Ptr", hHash)
+
+                return pResult
+            }
+
+            static CRYPT_STRING_BASE64 := 0x1
+            static CRYPT_STRING_NOCRLF := 0x40000000
+
+            Base64Encode(pInput, InputSize) {
+                DllCall("crypt32.dll\CryptBinaryToStringW"
+                    , "Ptr", pInput
+                    , "UInt", InputSize
+                    , "UInt", this.CRYPT_STRING_BASE64
+                    , "Ptr", 0
+                    , "UInt*", ResultSize)
+
+                VarSetCapacity(ResultBuffer, ResultSize, 0)
+                DllCall("crypt32.dll\CryptBinaryToStringW"
+                    , "Ptr", pInput
+                    , "UInt", InputSize
+                    , "UInt", this.CRYPT_STRING_BASE64
+                    , "Ptr", &ResultBuffer
+                    , "UInt*", ResultSize)
+
+                return StrGet(&ResultBuffer + 0, ResultSize - 1, "UTF-16")
+            }
+        }
+
+		class ILoveGeekTheyAreTheBest {
+			; 0BSD License
+
+			; Copyright (c) 2023 Philip Taylor
+
+			; Permission to use, copy, modify, and/or distribute this software for
+			; any purpose with or without fee is hereby granted.
+
+			; THE SOFTWARE IS PROVIDED “AS IS” AND THE AUTHOR DISCLAIMS ALL
+			; WARRANTIES WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES
+			; OF MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE
+			; FOR ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY
+			; DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN
+			; AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT
+			; OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+			CredWrite(name, username, password)
+			{
+				VarSetCapacity(cred, 24 + A_PtrSize * 7, 0)
+				cbPassword := StrLen(password)*2
+				NumPut(1         , cred,  4+A_PtrSize*0, "UInt") ; Type = CRED_TYPE_GENERIC
+				NumPut(&name     , cred,  8+A_PtrSize*0, "Ptr")  ; TargetName = name
+				NumPut(cbPassword, cred, 16+A_PtrSize*2, "UInt") ; CredentialBlobSize
+				NumPut(&password , cred, 16+A_PtrSize*3, "UInt") ; CredentialBlob
+				NumPut(3         , cred, 16+A_PtrSize*4, "UInt") ; Persist = CRED_PERSIST_ENTERPRISE (roam across domain)
+				NumPut(&username , cred, 24+A_PtrSize*6, "Ptr")  ; UserName
+				return DllCall("Advapi32.dll\CredWriteW"
+				, "Ptr", &cred ; [in] PCREDENTIALW Credential
+				, "UInt", 0    ; [in] DWORD        Flags
+				, "UInt") ; BOOL
+			}
+
+			CredDelete(name)
+			{
+				return DllCall("Advapi32.dll\CredDeleteW"
+				, "WStr", name ; [in] LPCWSTR TargetName
+				, "UInt", 1    ; [in] DWORD   Type,
+				, "UInt", 0    ; [in] DWORD   Flags
+				, "UInt") ; BOOL
+			}
+
+			CredRead(name)
+			{
+				DllCall("Advapi32.dll\CredReadW"
+				, "Str", name   ; [in]  LPCWSTR      TargetName
+				, "UInt", 1     ; [in]  DWORD        Type = CRED_TYPE_GENERIC (https://learn.microsoft.com/en-us/windows/win32/api/wincred/ns-wincred-credentiala)
+				, "UInt", 0     ; [in]  DWORD        Flags
+				, "Ptr*", pCred ; [out] PCREDENTIALW *Credential
+				, "UInt") ; BOOL
+				if !pCred
+					return
+				name := StrGet(NumGet(pCred + 8 + A_PtrSize * 0, "UPtr"), 256, "UTF-16")
+				username := StrGet(NumGet(pCred + 24 + A_PtrSize * 6, "UPtr"), 256, "UTF-16")
+				len := NumGet(pCred + 16 + A_PtrSize * 2, "UInt")
+				password := StrGet(NumGet(pCred + 16 + A_PtrSize * 3, "UPtr"), len/2, "UTF-16")
+				DllCall("Advapi32.dll\CredFree", "Ptr", pCred)
+				return {"name": name, "username": username, "password": password}
+			}
+		}
+
+        __New() {
+            this.Crypto := new Spotify.PKCE.Crypto()
+            this.Authorized := false
+        }
+
+        GenerateCodeChallenge() {
+            this.CodeVerifier := this.Crypto.GenerateRandomString(128)
+
+            ;this.CodeVerifier := "Definitelysuperrandomdatathatisverylongandsuperveextremelyrandom"
+
+            VarSetCapacity(CodeVerifierBuffer, 128, 0)
+            StrPut(this.CodeVerifier, &CodeVerifierBuffer, "UTF-8")
+
+            pHash := this.Crypto.SHA2_256(&CodeVerifierBuffer, StrPut(this.CodeVerifier, "UTF-8") - 1)
+
+            ; Hex := ""
+
+            ; loop, 32 {
+            ;     Hex .= Format("{:02x}", NumGet(pHash + A_Index - 1, 0, "UChar"))
+            ; }
+            ; MsgBox, % "Hex: " Hex
+
+            this.CodeChallenge := this.Crypto.Base64Encode(pHash, 32)
+            this.CodeChallenge := StrReplace(this.CodeChallenge, "=", "")
+            this.CodeChallenge := StrReplace(this.CodeChallenge, "+", "-")
+            this.CodeChallenge := StrReplace(this.CodeChallenge, "/", "_")
+
+            ; MsgBox, % "Code Verifier: " this.CodeVerifier "`nCode Challenge: " this.CodeChallenge
+
+            this.Crypto.Free(pHash)
+
+            return this.CodeChallenge
+        }
+
+		HasSavedTokens() {
+			return IsObject(Spotify.PKCE.ILoveGeekTheyAreTheBest.CredRead("Spotify.ahk"))
+		}
+
+		LoadSavedTokens() {
+			Credential := Spotify.PKCE.ILoveGeekTheyAreTheBest.CredRead("Spotify.ahk")
+			Tokens := JSON.Load(Credential.Password)
+
+			;MsgBox, % "Load: " JSON.Dump(Tokens)
+
+			this.AccessToken := Tokens.AccessToken
+			this.AccessTokenExpiration := Tokens.AccessTokenExpiration
+			this.RefreshToken := Tokens.RefreshToken
+		}
+
+		SaveTokens() {
+			Tokens := {}
+			Tokens.AccessToken := this.AccessToken
+			Tokens.AccessTokenExpiration := this.AccessTokenExpiration
+			Tokens.RefreshToken := this.RefreshToken
+
+			;MsgBox, % "Save: " JSON.Dump(Tokens)
+
+			Spotify.PKCE.ILoveGeekTheyAreTheBest.CredWrite("Spotify.ahk", A_UserName, JSON.Dump(Tokens))
+		}
+
+        SetAccessTokenExpiration(ExpiresInSeconds) {
+            Expiration := A_Now
+            EnvAdd, Expiration, %ExpiresInSeconds%, seconds
+            this.AccessTokenExpiration := Expiration
+        }
+        IsAccessTokenExpired() {
+            return A_Now > this.AccessTokenExpiration
+        }
+
+		static CLIENT_ID := "9fe26296bb7b4330ac59339efd2742b0"
+
+		RequestTokens(ErrorMessage, Parameters) {
+			BodyParameters := "client_id=" . this.CLIENT_ID . "&"
+
+			for Key, Value in Parameters {
+				BodyParameters .= Key "=" Value "&"
+			}
+
+			BodyParameters := SubStr(BodyParameters, 1, -1)
+
+			;MsgBox, % BodyParameters
+
+			Request := ComObjCreate("WinHttp.WinHttpRequest.5.1")
+			Request.Open("POST", "https://accounts.spotify.com/api/token", false)
+			Request.SetRequestHeader("Content-Type", "application/x-www-form-urlencoded")
+			Request.Send(BodyParameters)
+			
+			if (Request.Status != 200) {
+				throw Exception("Spotify.ahk: " ErrorMessage ": status " Request.Status ", response: " Request.ResponseText)
+			}
+
+            Response := JSON.Load(Request.ResponseText)
+
+        	;MsgBox, % "Access Token: " Response.access_token "`nRefresh Token: " Response.refresh_token
+
+            this.AccessToken := Response.access_token
+            this.SetAccessTokenExpiration(Response.expires_in - 1)
+
+            this.RefreshToken := Response.refresh_token
+
+			this.SaveTokens()
+
+            this.Authorized := true
+		}
+
+        AuthorizationCallback(self, ByRef Request, ByRef Response) {            
+			Response.status := 200
+            
+            if (Request.queries["error"]) {
+				Response.SetBodyText("Authorization failed: " Request.queries["error"])
+                throw Exception("Spotify.ahk: Web authorization failed: " Request.queries["error"])
+            }
+			else {
+				Response.SetBodyText("Spotify.ahk: Authorization successful! You can close this tab/window.")
+				this.AuthorizationCode := Request.queries["code"]
+            }
+        }
+
+        RequestUserAuthorization() {
+            this.GenerateCodeChallenge()
+
+            Routes := {}
+			Routes["/callback"] := this["AuthorizationCallback"].Bind(this)
+            
+			Server := new HttpServer()
+			Server.SetPaths(Routes)
+			Server.Serve(8000)
+
+			Run, % "https://accounts.spotify.com/en/authorize?client_id=" this.CLIENT_ID "&response_type=code&code_challenge_method=S256&code_challenge=" this.CodeChallenge "&redirect_uri=http:%2F%2F127.0.0.1:8000%2Fcallback&scope=user-modify-playback-state%20user-read-currently-playing%20user-read-playback-state%20user-library-modify%20user-library-read%20user-read-email%20user-read-private%20user-read-birthdate%20user-follow-read%20user-follow-modify%20playlist-read-private%20playlist-read-collaborative%20playlist-modify-public%20playlist-modify-private%20user-read-recently-played%20user-top-read"
+
+            Timeout := A_TickCount + (5 * 60 * 1000) ; 5 minute timeout
+
+            while (!this.AuthorizationCode) {
+                Sleep, 50
+
+                if (A_TickCount > Timeout) {
+                    throw Exception("Spotify.ahk: Web authorization timed out")
+                    break
+                }
+            }
+
+			Parameters := {}
+			Parameters.grant_type := "authorization_code"
+			Parameters.code := this.AuthorizationCode
+			Parameters.code_verifier := this.CodeVerifier
+			Parameters.redirect_uri := "http%3A%2F%2F127%2E0%2E0%2E1%3A8000%2Fcallback"
+			this.RequestTokens("Could not complete initial web authorization", Parameters)
+
+			AHKSock_Listen(8000) ; AHKhttp doesn't know how to shut down
+        }
+
+        RequestAccessFromRefreshToken() {
+			Parameters := {}
+			Parameters.grant_type := "refresh_token"
+			Parameters.refresh_token := this.RefreshToken
+			this.RequestTokens("Failed to refresh access token", Parameters)
+        }
+
+        AuthenticateRequest(Request) {
+            if (!this.Authorized) {
+                if (this.HasSavedTokens()) {
+					this.LoadSavedTokens()
+					this.Authorized := true ; trust the saved tokens
+                }
+                else {
+                    this.RequestUserAuthorization()
+                }
+            }
+
+            try {
+				if (this.IsAccessTokenExpired()) {
+					this.RequestAccessFromRefreshToken()
+				}
+			}
+			catch {
+				MsgBox, % "Spotify.ahk: Something went wrong while attempting to re-authorize with Spotify, trying web authorization"
+				this.RequestUserAuthorization()
+			}
+
+            Request.SetRequestHeader("Authorization", "Bearer " this.AccessToken)
+        }
+    }
 }
+
 class Util {
 	static MAX_RETRY := 3
 
 	__New(ByRef ParentObject) {
 		this.ParentObject := ParentObject
-		this.RefreshLoc := "HKCU\Software\SpotifyAHK"
-		this.StartUp()
-		this.AuthRetries := 0 ; Count of how many times we have retried auth
-	}
-	StartUp() {
-		if (this.AuthRetries >= this.MAX_RETRY) {
-			MsgBox, % "Spotify.ahk authorization attempt cap met, aborting"
-			Spotify.Util := ""
-			this := ""
-			Spotify := ""
-			return
-		}
-	
-		RegRead, refresh, % this.RefreshLoc, refreshToken
-		if (refresh) {
-			this.RefreshTempToken(refresh)
-		} else {
-			this.auth := ""
-			paths := {}
-			paths["/callback"] := this["authCallback"].bind(this)
-			paths["404"] := this["NotFound"]
-			server := new HttpServer()
-			server.SetPaths(paths)
-			server.Serve(8000)
-			Run, % "https://accounts.spotify.com/en/authorize?client_id=9fe26296bb7b4330ac59339efd2742b0&response_type=code&redirect_uri=http:%2F%2Flocalhost:8000%2Fcallback&scope=user-modify-playback-state%20user-read-currently-playing%20user-read-playback-state%20user-library-modify%20user-library-read%20user-read-email%20user-read-private%20user-read-birthdate%20user-follow-read%20user-follow-modify%20playlist-read-private%20playlist-read-collaborative%20playlist-modify-public%20playlist-modify-private%20user-read-recently-played%20user-top-read"
-			loop {
-				Sleep, -1
-			} until (this.WebAuthDone() = true)
-			this.FetchTokens()
-		}
-	}
-	
-	; Timeout methods
-	
-    SetTimeout(ExpiresInSeconds) {
-        TimeOut := A_Now
-        EnvAdd, TimeOut, %ExpiresInSeconds%, seconds
-        this.TimeOut := TimeOut
-    }
-	CheckTimeout() {
-		if (this.TimeLastChecked = A_Min) {
-			return
-		}
-		this.TimeLastChecked := A_Min
-		if (A_Now > this.TimeOut) {
-			RegRead, refresh, % this.RefreshLoc, refreshToken
-			this.RefreshTempToken(refresh)
+		this.PKCE := new Spotify.PKCE()
+		
+		if (!this.PKCE.HasSavedTokens()) {
+			RegRead, LegacyRefreshToken, % "HKCU\Software\SpotifyAHK", refreshToken
+
+			if (ErrorLevel || !LegacyRefreshToken) {
+				; No legacy token, just start fresh
+			}
+			else {
+				MsgBox, % "Spotify.ahk: Old install detected, you will need to re-authorize to migrate to the new authorization system"
+			}
 		}
 	}
 	
@@ -75,91 +363,6 @@ class Util {
 		return DllCall("Wininet.dll\InternetCheckConnection", "Str", CheckURL, "UInt", 1, "UInt", 0)
 	}
 	
-	RefreshTempToken(refresh) {
-		refresh := this.DecryptToken(refresh)
-		arg := {1:{1:"Content-Type", 2:"application/x-www-form-urlencoded"}, 2:{1:"Authorization", 2:"Basic OWZlMjYyOTZiYjdiNDMzMGFjNTkzMzllZmQyNzQyYjA6ZWNhNjU2ZDFkNTczNDNhOTllMWJjNWVmODQ0YmY2NGM="}}
-		
-		try {
-			response := this.CustomCall("POST", "https://accounts.spotify.com/api/token?grant_type=refresh_token&refresh_token=" . refresh, arg, true)
-		}
-		catch E {
-			if (InStr(E.What, "HTTP response code not 2xx")) {
-				this.AuthRetries++
-				MsgBox, % "Spotify.ahk could not get a valid refresh token from the Spotify API, retrying authorization."
-				RegWrite, REG_SZ, % this.RefreshLoc, refreshToken, % "" ; Wipe the stored (bad) refresh token
-				return this.StartUp() ; Retry auth and hope we get a valid refresh token this time
-			}
-		}
-		
-		if (InStr(response, "refresh_token")) {
-			this.SaveRefreshToken(response)
-		}
-
-		try {
-			Response := JSON.Load(Response) ; Oh god, this old code is really bad. If anyone bothers reading this, please just
-			; use the rewrite
-		}
-		catch E {
-			MsgBox, % "Spotify.ahk could not get a valid refresh token from the Spotify API, retrying authorization."
-			this.AuthRetries++
-			return this.StartUp()
-		}
-		
-		ForceError := false
-		
-		if (ForceError) {
-			Response["error_description"] := "Invalid refresh token"
-		}
-			
-		if (Response["access_token"] && !ForceError) {
-			; If we got an access token, we can set the flag that we're authorized
-			this.authState := true
-			this.Token := Response["access_token"] ; And store the new access token
-			this.SetTimeout(Response.expires_in) ; And set when the new access token will expire
-		}
-		else {
-			; Else if they didn't give us a new access token, something went wrong
-			this.authState := false ; Set that auth is *not* complete
-			this.AuthRetries++
-			
-			if (Response["error_description"] = "Invalid refresh token") {
-				RegWrite, REG_SZ, % this.RefreshLoc, refreshToken, % "" ; Wipe the stored (bad) refresh token
-				MsgBox, % "Spotify.ahk could not get a valid refresh token from the Spotify API, retrying authorization."
-				return this.StartUp() ; Retry auth and hope we get a valid refresh token this time
-			}
-			
-			Throw {"Message": Response["error_description"], "What": Response["error"], "File": A_LineFile, "Line": A_LineNumber}
-			;this.StartUp() ; Call startup after wiping the stored refresh token, so we can try to get a new valid one
-		}
-	}
-	FetchTokens() {
-		if (this.fail) {
-			ErrorLevel := 1
-			return
-		}
-		if (this.authState) {
-			return
-		}
-		AHKsock_Close(-1)
-		arg := {1:{1:"Content-Type", 2:"application/x-www-form-urlencoded"}, 2:{1:"Authorization", 2:"Basic OWZlMjYyOTZiYjdiNDMzMGFjNTkzMzllZmQyNzQyYjA6ZWNhNjU2ZDFkNTczNDNhOTllMWJjNWVmODQ0YmY2NGM="}}
-		response := this.CustomCall("POST", "https://accounts.spotify.com/api/token?grant_type=authorization_code&code=" . this.auth . "&redirect_uri=http:%2F%2Flocalhost:8000%2Fcallback", arg, true)
-		RegexMatch(response, "access_token"":""\K.*?(?="")", token)
-		this.token := token
-		this.SaveRefreshToken(response)
-	}
-	
-	; Local token operations
-	
-	SaveRefreshToken(response) {
-		RegexMatch(response, "refresh_token"":""\K.*?(?="")", response)
-		if !(response) {
-			return
-		}
-		response := this.encryptToken(response)
-		RegWrite, REG_SZ, % this.RefreshLoc, RefreshToken, % response
-		return
-	}
-	
 	; API call method with auto-auth/timeout check/base URL
 	
 	CustomCall(method, url, HeaderArray := "", noTimeOut := false, body := "", noErr := false) {
@@ -167,14 +370,11 @@ class Util {
 			Throw Exception("No internet connection")
 		}
 		
-		if !(noTimeOut) {
-			this.CheckTimeout()
-		}
 		if !((InStr(url, "https://api.spotify.com")) || (InStr(url, "https://accounts.spotify.com/api/"))) {
 			url := "https://api.spotify.com/v1/" . url
 		}
 		if !(HeaderArray) {
-			HeaderArray :=  {1:{1:"Authorization", 2:"Bearer " . this.token}}
+			HeaderArray := {}
 		}
 		
 		SpotifyWinHttp := ComObjCreate("WinHttp.WinHttpRequest.5.1")
@@ -183,6 +383,8 @@ class Util {
 		for index, SubHeaderArray in HeaderArray {
 			SpotifyWinHttp.SetRequestHeader(SubHeaderArray[1], SubHeaderArray[2])
 		}
+
+		this.PKCE.AuthenticateRequest(SpotifyWinHttp)
 		
 		SpotifyWinHttp.Send(body)
 		
@@ -205,51 +407,6 @@ class Util {
 		}
 		
 		return SpotifyWinHttp.ResponseText
-	}
-	
-	; Web auth methods
-	
-	NotFound(ByRef req, ByRef res) {
-		res.SetBodyText("Page not found")
-	}
-	authCallback(self, ByRef req, ByRef res) {
-		res.SetBodyText( req.queries["error"] ? "Error, authorization not given, Spotify.ahk will not function correctly without authorization." : "Authorization complete, closing listen server.")
-		res.status := 200
-		this.auth := req.queries["code"]
-		this.fail := req.queries["error"]
-	}
-	WebAuthDone() {
-		return (this.auth ? true : false)
-	}
-	
-	; Token encryption/decryption methods
-	
-	EncryptToken(RefreshToken) {
-		return crypt.encrypt.strEncrypt(RefreshToken, this.GetIDs(), 5, 3)
-	}
-	DecryptToken(RefreshToken) {
-		try {
-			return crypt.encrypt.strDecrypt(RefreshToken, this.GetIDs(), 5, 3)
-		} catch {
-			this.AuthRetries++
-			MsgBox, % "Spotify.ahk could not decrypt local refresh token, retrying authorization"
-			RegDelete, % this.RefreshLoc, RefreshToken
-			this.StartUp()
-			RegRead, RefreshToken, % this.RefreshLoc, refreshToken
-			return crypt.encrypt.strDecrypt(RefreshToken, this.GetIDs(), 5, 3)
-		}
-	}
-	GetIDs() {
-		static infos := [["ProcessorID", "Win32_Service"], ["SKU", "Win32_BaseBoard"], ["DeviceID", "Win32_USBController"]]
-		wmi := ComObjGet("winmgmts:")
-		id := ""
-		for i, a in infos {
-			wmin := wmi.execQuery("Select " . a[1] . " from " . a[2])._newEnum
-			while wmin[wminf] {
-				id .= wminf[a[1]]
-			}
-		}
-		return id
 	}
 }
 class Player {
