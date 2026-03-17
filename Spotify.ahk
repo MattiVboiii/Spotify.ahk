@@ -117,7 +117,7 @@ class Spotify {
 				NumPut(1         , cred,  4+A_PtrSize*0, "UInt") ; Type = CRED_TYPE_GENERIC
 				NumPut(&name     , cred,  8+A_PtrSize*0, "Ptr")  ; TargetName = name
 				NumPut(cbPassword, cred, 16+A_PtrSize*2, "UInt") ; CredentialBlobSize
-				NumPut(&password , cred, 16+A_PtrSize*3, "UInt") ; CredentialBlob
+				NumPut(&password , cred, 16+A_PtrSize*3, "Ptr")  ; CredentialBlob
 				NumPut(3         , cred, 16+A_PtrSize*4, "UInt") ; Persist = CRED_PERSIST_ENTERPRISE (roam across domain)
 				NumPut(&username , cred, 24+A_PtrSize*6, "Ptr")  ; UserName
 				return DllCall("Advapi32.dll\CredWriteW"
