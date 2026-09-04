@@ -45,7 +45,7 @@ GetPlaylist(strPlaylistID, strPlaylistName)
 		oNewTrack.Title := oTrack.name
 		for intArtistOrder, oArtist in oTrack.artists
 			oNewTrack.Artists .= oArtist.name . ", "
-		oNewTrack.Artists := SubStr(oNewTrack.Artiste, 1, -2)
+		oNewTrack.Artists := SubStr(oNewTrack.Artists, 1, -2)
 		oNewTrack.Album := oTrack.album.name
 		oNewTrack.ISRC := oTrack.json.external_ids.isrc
 		oNewTrack.Seconds := Round(oTrack.json.duration_ms / 1000)

@@ -1,53 +1,149 @@
 ﻿/*
-Hotkeys examples for Spotify class
-Source: https://github.com/CloakerSmoker/Spotify.ahk
-Documentation (updated): https://cloakersmoker.github.io/Spotify.ahk/rewrite/index.html
-
-This example edited by: Jean Lalonde (https://github.com/JnLlnd) 2022-08-19
+Example hotkeys for Spotify.ahk
+Edit Config.ahk to change keys and volume behavior.
 */
 
-#requires AutoHotkey v1.1
-#SingleInstance,Force
+#Requires AutoHotkey v1.1
+#SingleInstance Force
 
+#Include %A_ScriptDir%\Config.ahk
 #Include %A_ScriptDir%\Spotify.ahk
 
 spoofy := new Spotify
-Increment := 5
 
-PlaybackInfo := spoofy.Player.GetCurrentPlaybackInfo()
-VolumePercentage := PlaybackInfo.Device.Volume
-ShuffleMode := PlaybackInfo.shuffle_state
-RepeatMode := (PlaybackInfo.repeat_state = "context" ? 2 : PlaybackInfo.repeat_state = "track" ? 1 : 3) ; 1 "track", 2 "context" (album, playlist, etc.), any other value "off"
+CurrentVolume := -1
+ShuffleMode := ""
+RepeatMode := ""
+
+BindHotkey(VolumeDownKey, "VolumeDown")
+BindHotkey(VolumeUpKey, "VolumeUp")
+BindHotkey(PlayPauseKey, "PlayPause")
+BindHotkey(NextTrackKey, "NextTrack")
+BindHotkey(PreviousTrackKey, "PreviousTrack")
+BindHotkey(ShuffleKey, "ToggleShuffle")
+BindHotkey(RepeatKey, "CycleRepeat")
 
 return
 
-F1::
-if(VolumePercentage - Increment > 0)
-  VolumePercentage := VolumePercentage - Increment
-spoofy.Player.SetVolume(VolumePercentage) ; Decrement the volume percentage and set the player to the new volume percentage
+
+; =====================================
+; Hotkey handlers
+; =====================================
+
+VolumeDown:
+AdjustVolume(-VolumeIncrement)
 return
 
-F2::
-if(VolumePercentage + Increment <= 100)
-  VolumePercentage := VolumePercentage + Increment
-spoofy.Player.SetVolume(VolumePercentage) ; Increment the volume percentage and set the player to the new volume percentage
-return 
+VolumeUp:
+AdjustVolume(VolumeIncrement)
+return
 
-F3::
+PlayPause:
+try spoofy.Player.PlayPause()
+return
+
+NextTrack:
+try spoofy.Player.NextTrack()
+return
+
+PreviousTrack:
+try spoofy.Player.LastTrack()
+return
+
+ToggleShuffle:
+EnsurePlaybackState()
+if (ShuffleMode = "")
+    return
 ShuffleMode := !ShuffleMode
-spoofy.Player.SetShuffle(ShuffleMode) ; Swap the shuffle mode of the player
-return 
+try spoofy.Player.SetShuffle(ShuffleMode)
+return
 
-F4::
-RepeatMode := RepeatMode + (RepeatMode = 0 ? 1 : (RepeatMode = 1 ? 1 : (RepeatMode = 2 ? 1 : -2)))
-spoofy.Player.SetRepeatMode(RepeatMode) ; Cycle through the three repeat modes (1-2, 2-3, 3-1)
-return 
+CycleRepeat:
+EnsurePlaybackState()
+if (RepeatMode = "")
+    return
+; 1 = track, 2 = context, 3 = off
+RepeatMode := (RepeatMode = 1 ? 2 : (RepeatMode = 2 ? 3 : 1))
+try spoofy.Player.SetRepeatMode(RepeatMode)
+return
 
-F5::
-spoofy.Player.NextTrack()
-return 
 
-F6::
-spoofy.Player.LastTrack()
-return 
+; =====================================
+; Volume (debounced + cached)
+; =====================================
 
+AdjustVolume(Delta) {
+    global spoofy, CurrentVolume, ShowVolumeTip, VolumeDebounceMs, VolumeResyncMs
+
+    if (CurrentVolume < 0) {
+        try
+            PlaybackInfo := spoofy.Player.GetCurrentPlaybackInfo()
+        catch e
+            return
+
+        if (!IsObject(PlaybackInfo) || !IsObject(PlaybackInfo.Device))
+            return
+
+        Volume := PlaybackInfo.Device.Volume
+        if (Volume = "" || Volume = "null")
+            return
+
+        CurrentVolume := Volume
+    }
+
+    CurrentVolume += Delta
+    if (CurrentVolume < 0)
+        CurrentVolume := 0
+    else if (CurrentVolume > 100)
+        CurrentVolume := 100
+
+    if (ShowVolumeTip) {
+        ToolTip, % "Spotify  " CurrentVolume "%"
+        SetTimer, ClearVolumeTip, -700
+    }
+
+    SetTimer, ApplyVolume, % -VolumeDebounceMs
+    SetTimer, ResetVolumeCache, % -VolumeResyncMs
+}
+
+ApplyVolume:
+if (CurrentVolume >= 0) {
+    try
+        spoofy.Player.SetVolume(CurrentVolume)
+    catch e
+        CurrentVolume := -1
+}
+return
+
+ResetVolumeCache:
+CurrentVolume := -1
+return
+
+ClearVolumeTip:
+ToolTip
+return
+
+
+; =====================================
+; Helpers
+; =====================================
+
+BindHotkey(Key, LabelName) {
+    if (Key = "" || Key = "false" || Key = "off")
+        return
+    Hotkey, %Key%, %LabelName%, On
+}
+
+EnsurePlaybackState() {
+    global spoofy, ShuffleMode, RepeatMode
+    if (ShuffleMode != "" && RepeatMode != "")
+        return
+    try
+        Info := spoofy.Player.GetCurrentPlaybackInfo()
+    catch e
+        return
+    if (!IsObject(Info))
+        return
+    ShuffleMode := Info.shuffle_state
+    RepeatMode := (Info.repeat_state = "track" ? 1 : (Info.repeat_state = "context" ? 2 : 3))
+}

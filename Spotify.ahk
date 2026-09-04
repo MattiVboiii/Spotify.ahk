@@ -252,7 +252,8 @@ class Spotify {
             this.AccessToken := Response.access_token
             this.SetAccessTokenExpiration(Response.expires_in - 1)
 
-            this.RefreshToken := Response.refresh_token
+            if (Response.refresh_token)
+    					this.RefreshToken := Response.refresh_token
 
 			this.SaveTokens()
 
@@ -419,7 +420,10 @@ class Player {
 		* Requires something to be playing
 		* returns the text response from the API, which is empty unless there is an error
 		*/
-		return this.GetCurrentPlaybackInfo().Track.Save()
+		Info := this.GetCurrentPlaybackInfo()
+		if (!Info || !IsObject(Info.Track) || !Info.Track.id)
+			return false
+		return Info.Track.Save()
 	}
 	UnSaveCurrentlyPlaying() {
 		/*
@@ -427,7 +431,10 @@ class Player {
 		* Requires something to be playing
 		* returns the text response from the API, which is empty unless there is an error
 		*/
-		return this.GetCurrentPlaybackInfo().track.UnSave()
+		Info := this.GetCurrentPlaybackInfo()
+		if (!Info || !IsObject(Info.Track) || !Info.Track.id)
+			return false
+		return Info.Track.UnSave()
 	}
 	SetVolume(volume) {
 		/*
@@ -440,8 +447,14 @@ class Player {
 		* Calls me/player, which returns a whole bunch of different objects
 		* Translates JSON versions of track/device/context objects into custom objects
 		* Alters the original response object, so any extra info that can't be turned into an object is still returned
+		* Returns false when nothing is playing (Spotify responds 204 with an empty body)
 		*/
-		Resp := JSON.load(this.ParentObject.Util.CustomCall("GET", "me/player"))
+		ResponseText := this.ParentObject.Util.CustomCall("GET", "me/player")
+		if (!ResponseText)
+			return false
+		Resp := JSON.load(ResponseText)
+		if (!IsObject(Resp))
+			return false
 		Resp.Track := new track(Resp["item"], this.ParentObject)
 		Resp.Device := new device(Resp["device"], this.ParentObject)
 		Resp.Context := new context(Resp["context"], this.ParentObject)
@@ -486,7 +499,7 @@ class Player {
 		*/
 		Resp := JSON.Load(this.ParentObject.Util.CustomCall("GET", "me/player/recently-played?limit=50"))
 		for k, v in Resp["items"] {
-			v := {"track": new track(v["track"], this.ParentObject), "context": new context(v["context"], this.ParentObject), "played_at": v["played_at"]}
+			Resp["items"][k] := {"track": new track(v["track"], this.ParentObject), "context": new context(v["context"], this.ParentObject), "played_at": v["played_at"]}
 		}
 		return Resp
 	}
@@ -539,7 +552,10 @@ class Player {
 		/*
 		* Figure this one out on your own
 		*/
-		return ((this.GetCurrentPlaybackInfo()["is_playing"] = 0) ? (this.ResumePlayback()) : (this.PausePlayback()))
+		Info := this.GetCurrentPlaybackInfo()
+		if (!Info)
+			return false
+		return (Info["is_playing"] = 0) ? this.ResumePlayback() : this.PausePlayback()
 	}
 }
 class Library {
@@ -627,9 +643,8 @@ class Playlists {
 		return PlaylistObject
 	}
 	CreatePlaylist(name, description, public := true) {
-		headers := {1:{1:"Authorization", 2:"Bearer " . this.ParentObject.Util.token}, 2:{1:"Content-Type", 2:"application/json"}}
-		body := "{""name"":""" . name . """, ""description"":""" . description """, ""public"":" . public . "}"
-		MsgBox, % body
+		headers := {1:{1:"Content-Type", 2:"application/json"}}
+		body := JSON.Dump({"name": name, "description": description, "public": public})
 		return new playlist(JSON.Load(this.ParentObject.Util.CustomCall("POST", "users/" . this.ParentObject.CurrentUser.id . "/playlists", headers,, body)), this.ParentObject)
 	}
 }
@@ -680,7 +695,7 @@ class playlist {
 		return this.SpotifyObj.Util.CustomCall("PUT", "me/player/play",, false, JSON.Dump({"context_uri": "spotify:playlist:" . this.id}))
 	}
 	Delete() {
-		this.SpotifyObj.Util.CustomCall("DELETE", "https://api.spotify.com/v1/playlists/" . this.id "/followers")
+		this.SpotifyObj.Util.CustomCall("DELETE", "https://api.spotify.com/v1/playlists/" . this.id . "/followers")
 		return
 	}
 	GetAllTracks() {
@@ -704,6 +719,8 @@ class track {
 	__New(ResponseTrackObj, ByRef Parent := "") {
 		this.SpotifyObj := Parent
 		this.json := ResponseTrackObj
+		if (!IsObject(ResponseTrackObj))
+			return
 		this.id := this.json["id"]
 		this.album := new album(this.json["album"], this.SpotifyObj) ; TODO -- Album objects
 		this.artists := []
@@ -737,6 +754,8 @@ class album {
 	__New(Albumjson, ByRef Parent := "") {
 		this.SpotifyObj := Parent
 		this.json := Albumjson
+		if (!IsObject(Albumjson))
+			return
 		this.artists := this.json["artists"]
 		this.genres := this.json["genres"]
 		this.id := this.json["id"]
@@ -776,6 +795,8 @@ class device {
 	__New(Devicejson, ByRef Parent := "") {
 		this.SpotifyObj := Parent
 		this.json := Devicejson
+		if (!IsObject(Devicejson))
+			return
 		this.id := this.json["id"]
 		this.IsActive := this.json["is_active"]
 		this.IsPrivate := this.json["is_private_session"]
@@ -793,6 +814,8 @@ class context {
 	__New(Contextjson, ByRef Parent := "") {
 		this.SpotifyObj := Parent
 		this.json := Contextjson
+		if (!IsObject(Contextjson))
+			return
 		this.uri := this.json["uri"]
 		this.type := this.json["type"]
 	}

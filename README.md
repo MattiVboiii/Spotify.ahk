@@ -1,31 +1,64 @@
-# Spotify.ahk
+# Spotify.ahk (fork)
 
-Disclaimer: Some features of Spotify.ahk will not work for non-premium users, this is not a limition of Spotify.ahk, but a limit in Spotify's Connect Web API as stated in its documentation.
+An [AutoHotkey](https://www.autohotkey.com/) v1 wrapper for the [Spotify Web API](https://developer.spotify.com/documentation/web-api), focused on controlling Spotify’s volume and playback.
+
+This is a maintained fork of [CloakerSmoker/Spotify.ahk](https://github.com/CloakerSmoker/Spotify.ahk) with reliability fixes and simpler hotkey setup.
+
+> **Premium required** for playback control. Spotify’s Connect Web API only controls Premium users’ playback.
+
+## Quick start
+
+1. Install [AutoHotkey v1.1](https://www.autohotkey.com/) (not v2).
+2. Clone or download this repo.
+3. Edit **`Config.ahk`** — set your keys and volume step.
+4. Run **`Example Hotkeys.ahk`**.
+5. On first launch, authorize in the browser tab that opens. Tokens are stored in Windows Credential Manager afterward.
+
+### Config example
+
+```ahk
+VolumeDownKey      := "F13"
+VolumeUpKey        := "F14"
+VolumeIncrement    := 2
+ShowVolumeTip      := true
+
+PlayPauseKey       := "Media_Play_Pause"
+NextTrackKey       := "Media_Next"
+PreviousTrackKey   := "Media_Prev"
 ```
-Note:
-  With Connect Web API you can only control Spotify Premium users’ playback.
-``` 
 
-## REQUIRED UPDATE FOR EXISTING USERS
+Leave a key as `""` to disable it. Any AutoHotkey [hotkey syntax](https://www.autohotkey.com/docs/v1/Hotkeys.htm) works (modifiers, media keys, mouse buttons, etc.).
 
-Before 2025-10-17, Spotify.ahk used Spotify's "Implicit grant" authorization flow, which was deprecated by Spotify in February 2025, and will be (or already has been) disabled by them on November 27th of 2025.
+## What’s improved in this fork
 
-As of 2025-10-17, Spotify.ahk *has* been updated to a modern authorization flow, and should be November 27th-proof (and should also actually be more secure. thanks Spotify). However, this change comes with effectively 0 testing (I don't run Windows or AutoHotkey anymore), so mileage will vary.
+- Safer handling when nothing is playing (empty / 204 responses)
+- Debounced volume control with cache resync
+- Configurable hotkeys via `Config.ahk` (no script editing required for keys)
+- Fixes: playlist delete URL, create-playlist auth/debug popup, recently-played mapping, export artists typo
 
-Anyways, if you're running this code and get some wacky crazy error message: Updating *should* fix it. You'll have to do the web authorization again, but then things should be fine.
+## Library usage
 
-### README
+```ahk
+#Include %A_ScriptDir%\Spotify.ahk
+spoofy := new Spotify
 
-An AutoHotkey wrapper for the Spotify web API designed to allow control over Spotify's internal volume slider and provide various other functionality.
+spoofy.Player.SetVolume(50)
+spoofy.Player.NextTrack()
+spoofy.Player.PlayPause()
+```
 
-Uses a slightly modified version of the [AHKhttp library by zhamlin](https://github.com/zhamlin/AHKhttp), the [AHKsock library by jleb](https://github.com/jleb/AHKsock) and the [Crypt library by Deo](https://autohotkey.com/board/topic/67155-ahk-l-crypt-ahk-cryptography-class-encryption-hashing/)
+More examples: `Example Hotkeys.ahk`, `ExportSpotifyPlaylist.ahk`  
+Upstream docs (incomplete): https://cloakersmoker.github.io/Spotify.ahk/index.html
 
-### Documentation can now be found [here](https://cloakersmoker.github.io/Spotify.ahk/index.html), however it is not complete.
+## Auth note (existing users)
 
-#### How to use
-Create a new Spotify object, and call methods from the various nested classes. Examples can been seen in the Example Hotkeys file and throughout the documentation.
+Spotify deprecated Implicit Grant. This project uses PKCE. If you used an older build, re-authorize once when prompted.
 
-When you create a new Spotify object for the first time, a Spotify app authorization page will open in your default browser, and you will be prompted to authorize `Spotify.ahk`.
-While you can choose not to authorize Spotify.ahk, all functionality will be lost without valid authorization. 
+## Credits
 
-You will only rarely need to do web authorization thanks to Spotify's refreshable user authorization.
+- Original library: [CloakerSmoker/Spotify.ahk](https://github.com/CloakerSmoker/Spotify.ahk)
+- [AHKhttp](https://github.com/zhamlin/AHKhttp) (zhamlin), [AHKsock](https://github.com/jleb/AHKsock) (jleb), [Crypt](https://autohotkey.com/board/topic/67155-ahk-l-crypt-ahk-cryptography-class-encryption-hashing/) (Deo)
+
+## License
+
+GPL-3.0 (same as upstream)
