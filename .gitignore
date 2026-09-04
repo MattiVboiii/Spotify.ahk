@@ -2,18 +2,13 @@
 Thumbs.db
 Desktop.ini
 ehthumbs.db
+.DS_Store
 
-# AutoHotkey / editor
+# Editor
 *.bak
 *.tmp
 *.swp
 *~
+*.ahk.bak
 .vscode/
 .idea/
-*.ahk.bak
-
-# Local overrides (optional — Config.ahk is shipped with defaults)
-# Config.local.ahk
-
-# OS
-.DS_Store
