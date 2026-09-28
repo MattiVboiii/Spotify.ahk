@@ -15,7 +15,7 @@ Fork of [CloakerSmoker/Spotify.ahk](https://github.com/CloakerSmoker/Spotify.ahk
 5. Run **`Spotify Volume.ahk`**.
 6. Authorize in the browser the first time (tokens are stored in Windows Credential Manager).
 
-Tray icon: **Reload** · **Open Config…** · **Re-authorize…** · **Add/Remove Startup** · **Exit**
+Tray icon: **Reload** · **Open Config…** · **Re-authorize…** · **Check for Updates…** · **Add/Remove Startup** · **Exit**
 
 ## What’s different from the original
 
@@ -28,21 +28,23 @@ The upstream project is a general Spotify Web API library. This fork is a ready-
 - Can **wake Spotify / pick a Connect device** if nothing is active
 - Optional **admin / UI Access** mode so hotkeys still work over fullscreen games
 - Tray helpers: reload, edit config, Windows startup shortcut, re-authorize
+- Optional **update check** against [GitHub Releases](https://github.com/MattiVboiii/Spotify.ahk/releases) (prompts once per new version)
 - **AutoHotkey v2 only** — library kept to playback + volume (no playlist APIs)
 
 ## Config
 
 Sections in `Config.ahk` match the comments in the file:
 
-| #   | Section  | Examples                                                |
-| --- | -------- | ------------------------------------------------------- |
-| 1   | Volume   | keys, step size, scroll smoothing                       |
-| 2   | Playback | play/pause, next/prev, shuffle, repeat, like            |
-| 3   | Seek     | skip forward/back by N seconds                          |
-| 4   | Tip      | where the on-screen tip appears, show track name or not |
-| 5   | Device   | auto-connect / launch Spotify when idle                 |
-| 6   | Games    | `ElevateMode` for fullscreen                            |
-| 7   | Auth     | optional own Spotify app client id                      |
+| #   | Section  | Examples                                                    |
+| --- | -------- | ----------------------------------------------------------- |
+| 1   | Volume   | keys, step size, scroll smoothing                           |
+| 2   | Playback | play/pause, next/prev, shuffle, repeat, like                |
+| 3   | Seek     | skip forward/back by N seconds                              |
+| 4   | Tip      | where the on-screen tip appears, show track name or not     |
+| 5   | Device   | auto-connect / launch Spotify when idle                     |
+| 6   | Games    | `ElevateMode` for fullscreen                                |
+| 7   | Auth     | optional own Spotify app client id                          |
+| 8   | Updates  | `CheckForUpdates` — prompt once when a newer release exists |
 
 ```ahk
 ; Volume
@@ -71,6 +73,8 @@ NowPlayingTipOn := "volume"   ; volume | playback | both | off
 AutoActivateDevice := true
 ElevateMode := ""             ; "" | "uia" | "admin"
 ; SpotifyClientId := ""
+
+CheckForUpdates := true       ; false to disable
 ```
 
 Modifiers: `^` Ctrl · `!` Alt · `+` Shift · `#` Win.  
@@ -88,6 +92,12 @@ ElevateMode := "uia"     ; needs AutoHotkey installed under Program Files
 ```
 
 Borderless / windowed mode is usually more reliable than exclusive fullscreen.
+
+### Updates
+
+Version lives in the root **`VERSION`** file (bump that when tagging a release).
+
+On startup (a few seconds after launch), the script checks the latest [GitHub release](https://github.com/MattiVboiii/Spotify.ahk/releases). If a newer version exists, it prompts once for that version (Yes opens the release page). Set `CheckForUpdates := false` to turn this off, or use the tray **Check for Updates…** item anytime.
 
 ## Autostart
 

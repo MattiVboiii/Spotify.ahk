@@ -9,7 +9,8 @@ Edit Config.ahk (same section order as below), then Reload from tray.
   5. Device / cache
   6. Elevation / config bootstrap
   7. Tray
-  8. Utilities
+  8. Updates
+  9. Utilities
 */
 
 #Requires AutoHotkey v2.0
@@ -20,6 +21,11 @@ Edit Config.ahk (same section order as below), then Reload from tray.
 #Include %A_ScriptDir%\Spotify.ahk
 
 ; --- Runtime state (statics; no global spam) ---
+
+class App {
+    static Version := "0.0.0"
+    static GitHubRepo := "MattiVboiii/Spotify.ahk"
+}
 
 class Cfg {
     ; Defaults — LoadConfig() overwrites from Config.ahk (same section order)
@@ -50,10 +56,11 @@ class Cfg {
     static TipDurationMs := 900
     static TipOpacity := 230
     static NowPlayingTipOn := "volume"
-    ; 5–7
+    ; 5–8
     static AutoActivateDevice := true
     static ElevateMode := ""
     static SpotifyClientId := ""
+    static CheckForUpdates := true
 }
 
 ; --- Avoid naming this "Volume" (clashes with SetVolume parameter names) ---
@@ -76,6 +83,7 @@ class Playback {
 ; --- Bootstrap ---
 
 OnError(ScriptError)
+App.Version := ReadAppVersion()
 LoadConfig()
 MaybeElevate()
 EnsureConfigFile()
@@ -99,6 +107,7 @@ if IsObject(spoofy.CurrentUser) && spoofy.CurrentUser.subscriptionLevel = "free"
 
 SetupTray()
 BindHotkeys()
+ScheduleUpdateCheck()
 
 ; =============================================================================
 ; 1. Volume
@@ -659,10 +668,11 @@ LoadConfig() {
     Cfg.TipDurationMs := ConfigInt("TipDurationMs", 900, 200)
     Cfg.TipOpacity := ConfigInt("TipOpacity", 230, 50, 255)
     Cfg.NowPlayingTipOn := NormalizeNowPlayingTip()
-    ; 5–7. Device / Games / Auth
+    ; 5–8. Device / Games / Auth / Updates
     Cfg.AutoActivateDevice := ConfigBool("AutoActivateDevice", true)
     Cfg.ElevateMode := ElevateMode ?? ""
     Cfg.SpotifyClientId := Trim(String(SpotifyClientId ?? ""))
+    Cfg.CheckForUpdates := ConfigBool("CheckForUpdates", true)
 }
 
 MaybeElevate() {
@@ -749,12 +759,13 @@ BindHotkey(Key, Callback) {
 ; =============================================================================
 
 SetupTray() {
-    A_IconTip := "Spotify Volume"
+    A_IconTip := "Spotify Volume " App.Version
     Tray := A_TrayMenu
     Tray.Delete()
     Tray.Add("Reload", (*) => Reload())
     Tray.Add("Open Config…", TrayOpenConfig)
     Tray.Add("Re-authorize…", TrayReAuthorize)
+    Tray.Add("Check for Updates…", (*) => RunUpdateCheck(true))
     Tray.Add()
     if FileExist(A_Startup "\Spotify Volume.lnk")
         Tray.Add("Remove from Startup", TrayRemoveStartup)
@@ -809,7 +820,114 @@ TrayReAuthorize(*) {
 }
 
 ; =============================================================================
-; 8. Utilities
+; 8. Updates
+; =============================================================================
+
+ScheduleUpdateCheck() {
+    if !Cfg.CheckForUpdates
+        return
+    ; Defer so auth / tips are not blocked on startup
+    SetTimer(() => RunUpdateCheck(false), -3000)
+}
+
+RunUpdateCheck(Manual := false) {
+    try {
+        Release := FetchLatestRelease()
+        if !IsObject(Release) || Release.version = "" {
+            if Manual
+                MsgBox("Could not reach GitHub releases.", "Spotify Volume", "Icon!")
+            return
+        }
+
+        if CompareVersions(Release.version, App.Version) <= 0 {
+            if Manual
+                MsgBox("You're on the latest version (" App.Version ").", "Spotify Volume", "Iconi")
+            return
+        }
+
+        ; Startup: prompt once per remote version
+        if !Manual && Release.version = ReadLastSeenRelease()
+            return
+        WriteLastSeenRelease(Release.version)
+
+        Answer := MsgBox(
+            "A newer Spotify Volume is available.`n`n"
+            . "Current:  " App.Version "`n"
+            . "Latest:   " Release.version "`n`n"
+            . "Open the release page?",
+            "Spotify Volume", "YesNo Iconi"
+        )
+        if Answer = "Yes" && Release.url != ""
+            Run(Release.url)
+    } catch {
+        if Manual
+            MsgBox("Could not check for updates.", "Spotify Volume", "Icon!")
+    }
+}
+
+FetchLatestRelease() {
+    Req := ComObject("WinHttp.WinHttpRequest.5.1")
+    Req.Open("GET", "https://api.github.com/repos/" App.GitHubRepo "/releases/latest", false)
+    Req.SetRequestHeader("User-Agent", "Spotify.ahk/" App.Version)
+    Req.SetRequestHeader("Accept", "application/vnd.github+json")
+    Req.Send()
+    if Req.Status != 200
+        return false
+    Data := JSON.Load(Req.ResponseText)
+    if !IsObject(Data) || !Data.HasOwnProp("tag_name")
+        return false
+    Tag := Trim(String(Data.tag_name))
+    Tag := RegExReplace(Tag, "^[vV]", "")
+    Url := Data.HasOwnProp("html_url") ? Trim(String(Data.html_url)) : ""
+    if Url = ""
+        Url := "https://github.com/" App.GitHubRepo "/releases/latest"
+    return { version: Tag, url: Url }
+}
+
+CompareVersions(A, B) {
+    AParts := StrSplit(RegExReplace(String(A), "^[vV]", ""), ".")
+    BParts := StrSplit(RegExReplace(String(B), "^[vV]", ""), ".")
+    MaxLen := Max(AParts.Length, BParts.Length)
+    loop MaxLen {
+        Av := ToNumber(AParts.Has(A_Index) ? AParts[A_Index] : 0, 0)
+        Bv := ToNumber(BParts.Has(A_Index) ? BParts[A_Index] : 0, 0)
+        if Av < Bv
+            return -1
+        if Av > Bv
+            return 1
+    }
+    return 0
+}
+
+UpdateStatePath() {
+    Dir := A_AppData "\Spotify Volume"
+    if !DirExist(Dir)
+        DirCreate(Dir)
+    return Dir "\updates.ini"
+}
+
+ReadLastSeenRelease() {
+    try
+        return Trim(IniRead(UpdateStatePath(), "Updates", "LastSeenRelease", ""))
+    catch
+        return ""
+}
+
+WriteLastSeenRelease(Version) {
+    try IniWrite(Version, UpdateStatePath(), "Updates", "LastSeenRelease")
+}
+
+ReadAppVersion() {
+    try {
+        Version := Trim(FileRead(A_ScriptDir "\VERSION"))
+        if Version != ""
+            return RegExReplace(Version, "^[vV]", "")
+    }
+    return "0.0.0"
+}
+
+; =============================================================================
+; 9. Utilities
 ; =============================================================================
 
 Defer(Callback) {
@@ -817,25 +935,25 @@ Defer(Callback) {
 }
 
 FriendlyError(err) {
-	; Error.Message / .Extra are inherited — do not use HasOwnProp
-	try Extra := err.Extra
-	catch
-		Extra := ""
-	try Msg := err.Message
-	catch
-		Msg := ""
+    ; Error.Message / .Extra are inherited — do not use HasOwnProp
+    try Extra := err.Extra
+    catch
+        Extra := ""
+    try Msg := err.Message
+    catch
+        Msg := ""
 
-	if Extra = 429 || InStr(Msg, "rate", false)
-		return "Spotify: rate limited"
-	if Extra = "offline" || InStr(Msg, "internet", false) || InStr(Msg, "WinHttp", false)
-		return "Spotify: offline"
-	if Extra = "no_device" || InStr(Msg, "NO_ACTIVE_DEVICE") || InStr(Msg, "No active device")
-		return "Spotify: no active device"
-	if InStr(Msg, "PREMIUM_REQUIRED")
-		return "Spotify: Premium required"
-	if Extra = 401 || InStr(Msg, "token", false) || InStr(Msg, "authoriz", false)
-		return "Spotify: re-authorize needed"
-	return "Spotify: unavailable"
+    if Extra = 429 || InStr(Msg, "rate", false)
+        return "Spotify: rate limited"
+    if Extra = "offline" || InStr(Msg, "internet", false) || InStr(Msg, "WinHttp", false)
+        return "Spotify: offline"
+    if Extra = "no_device" || InStr(Msg, "NO_ACTIVE_DEVICE") || InStr(Msg, "No active device")
+        return "Spotify: no active device"
+    if InStr(Msg, "PREMIUM_REQUIRED")
+        return "Spotify: Premium required"
+    if Extra = 401 || InStr(Msg, "token", false) || InStr(Msg, "authoriz", false)
+        return "Spotify: re-authorize needed"
+    return "Spotify: unavailable"
 }
 
 ConfigKey(Name, Default := "") {
