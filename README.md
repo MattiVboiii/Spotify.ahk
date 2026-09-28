@@ -1,70 +1,99 @@
 # Spotify Volume (fork of Spotify.ahk)
 
-AutoHotkey **v2** hotkeys for **Spotify’s own volume** (not Windows volume), with optional playback controls. Built on a trimmed [Spotify Web API](https://developer.spotify.com/documentation/web-api) wrapper.
+AutoHotkey **v2** script for **Spotify’s own volume** (not Windows volume), plus optional playback hotkeys.
 
-Fork of [CloakerSmoker/Spotify.ahk](https://github.com/CloakerSmoker/Spotify.ahk) — reliability fixes, `Config.ahk` setup, AHK v2 only.
+Fork of [CloakerSmoker/Spotify.ahk](https://github.com/CloakerSmoker/Spotify.ahk).
 
-> **Premium required.** Spotify’s Connect Web API only controls Premium users’ playback.
+> **Premium required.** Spotify’s Connect API only controls Premium accounts.
 
 ## Quick start
 
 1. Install [AutoHotkey v2](https://www.autohotkey.com/).
 2. Clone or download this repo.
-3. Edit **`Config.ahk`** — volume keys, step size, optional playback keys.
-4. Run **`Spotify Volume.ahk`**.
-5. On first launch, authorize in the browser. Tokens go to Windows Credential Manager.
+3. Copy **`Config.example.ahk`** → **`Config.ahk`** (or run the script once — it creates that file for you).
+4. Edit **`Config.ahk`** — set your volume keys and anything else you want.
+5. Run **`Spotify Volume.ahk`**.
+6. Authorize in the browser the first time (tokens are stored in Windows Credential Manager).
 
-Tray icon (system tray): **Reload**, **Re-authorize…**, **Exit**.
+Tray icon: **Reload** · **Open Config…** · **Re-authorize…** · **Add/Remove Startup** · **Exit**
 
-### Config example
+## What’s different from the original
+
+The upstream project is a general Spotify Web API library. This fork is a ready-to-run volume/playback hotkey app on top of a trimmed copy of that library:
+
+- **`Spotify Volume.ahk`** — volume (and optional media) hotkeys out of the box
+- **`Config.ahk`** — all keys and options in one file (`Config.example.ahk` is the template; your `Config.ahk` is personal and gitignored)
+- Optional **mute, seek, shuffle, repeat, like/unlike**
+- On-screen tip for volume and/or the current track
+- Can **wake Spotify / pick a Connect device** if nothing is active
+- Optional **admin / UI Access** mode so hotkeys still work over fullscreen games
+- Tray helpers: reload, edit config, Windows startup shortcut, re-authorize
+- **AutoHotkey v2 only** — library kept to playback + volume (no playlist APIs)
+
+## Config
+
+Sections in `Config.ahk` match the comments in the file:
+
+| #   | Section  | Examples                                                |
+| --- | -------- | ------------------------------------------------------- |
+| 1   | Volume   | keys, step size, scroll smoothing                       |
+| 2   | Playback | play/pause, next/prev, shuffle, repeat, like            |
+| 3   | Seek     | skip forward/back by N seconds                          |
+| 4   | Tip      | where the on-screen tip appears, show track name or not |
+| 5   | Device   | auto-connect / launch Spotify when idle                 |
+| 6   | Games    | `ElevateMode` for fullscreen                            |
+| 7   | Auth     | optional own Spotify app client id                      |
 
 ```ahk
-VolumeDownKey      := "F13"              ; or "^Down", "!WheelDown", …
-VolumeUpKey        := "F14"
-MuteKey            := "F15"
-VolumeIncrement    := 2
-ShowVolumeTip      := true
+; Volume
+VolumeDownKey := "F13"
+VolumeUpKey   := "F14"
+MuteKey       := "F15"
+VolumeIncrement := 2
 
-PlayPauseKey       := "Media_Play_Pause" ; or "" to disable
-NextTrackKey       := "Media_Next"
-PreviousTrackKey   := "Media_Prev"
-ShuffleKey         := "^s"
-RepeatKey          := "^r"
-SaveTrackKey       := "^l"               ; like / unlike current track
+; Playback (leave "" to disable)
+PlayPauseKey     := "Media_Play_Pause"
+NextTrackKey     := "Media_Next"
+PreviousTrackKey := "Media_Prev"
+ShuffleKey := "^s"
+RepeatKey  := "^r"
+SaveTrackKey := "^l"
+
+; Seek
+SeekBackwardKey := "^Left"
+SeekForwardKey  := "^Right"
+SeekStepMs := 10000   ; 10 seconds
+
+; Tip
+TipPosition     := "bottom"   ; bottom | top | center
+NowPlayingTipOn := "volume"   ; volume | playback | both | off
+
+AutoActivateDevice := true
+ElevateMode := ""             ; "" | "uia" | "admin"
+; SpotifyClientId := ""
 ```
 
-Modifiers: `^` Ctrl · `!` Alt · `+` Shift · `#` Win. Leave a key as `""` to disable it. See [AutoHotkey v2 hotkeys](https://www.autohotkey.com/docs/v2/Hotkeys.htm).
+Modifiers: `^` Ctrl · `!` Alt · `+` Shift · `#` Win.  
+Full key list: [AutoHotkey v2 hotkeys](https://www.autohotkey.com/docs/v2/Hotkeys.htm).
 
-## Autostart on Windows login (`shell:startup`)
+Mouse-wheel volume keys (e.g. `!WheelDown`) speed up while you scroll quickly.
 
-So the script runs every time you sign in:
+### Fullscreen games
 
-1. Make sure **`Spotify Volume.ahk`** works when you double-click it (AutoHotkey v2 installed, authorized once).
-2. Press `Win + R`, type `shell:startup`, press Enter.  
-   That opens your personal Startup folder, usually:  
-   `%AppData%\Microsoft\Windows\Start Menu\Programs\Startup`
-3. Create a **shortcut** to the script there (don’t move the whole repo):
-   - Right-click `Spotify Volume.ahk` → **Show more options** (Windows 11) → **Create shortcut**, _or_ right-drag the file into the Startup folder and choose **Create shortcuts here**.
-   - Move/copy that shortcut into the Startup folder if it isn’t there already.
-4. Optional: rename the shortcut to something clear, e.g. `Spotify Volume`.
-5. Sign out and back in (or reboot) to confirm it starts. You should see the AutoHotkey tray icon.
+If hotkeys don’t work over a game:
 
-To stop autostart later, delete the shortcut from the Startup folder.
+```ahk
+ElevateMode := "uia"     ; needs AutoHotkey installed under Program Files
+; ElevateMode := "admin" ; shows a UAC prompt on start
+```
 
-> Keep the repo folder where the shortcut points. If you move the project, update or recreate the shortcut.
+Borderless / windowed mode is usually more reliable than exclusive fullscreen.
 
-## What’s in this fork
+## Autostart
 
-- Volume-first hotkeys with debounce + cache resync
-- Optional mute, shuffle, repeat, and like/unlike
-- Configurable keys in `Config.ahk`
-- AutoHotkey v2 only
-- Safe handling when nothing is playing / no active device
-- Corrupt-token recovery and HTTP retries (401 / 429 / 5xx)
-- Tray menu for reload and re-authorize
-- No playlist/export features (playback + volume only)
+Tray → **Add to Startup**, or: `Win+R` → `shell:startup` → shortcut to `Spotify Volume.ahk`.
 
-## Library usage
+## Using the library alone
 
 ```ahk
 #Requires AutoHotkey v2.0
@@ -74,18 +103,19 @@ spoofy := Spotify()
 spoofy.Player.SetVolume(50)
 spoofy.Player.PlayPause()
 spoofy.Player.PreviousTrack()
+spoofy.Player.SeekTo(30000)
 spoofy.Player.ToggleSaveCurrentlyPlaying()
 ```
 
-Focused on playback + volume (no playlist/library browsing APIs). Main script: `Spotify Volume.ahk`.
+## Auth
 
-## Auth note
+Uses PKCE. To force a new login: tray **Re-authorize…**, or delete the `Spotify.ahk` entry in Windows Credential Manager.
 
-Uses PKCE. If you authorized an older build (or scopes changed), use the tray **Re-authorize…** item (or delete the `Spotify.ahk` credential in Windows Credential Manager).
+To use your own Spotify app: set `SpotifyClientId` and add `http://127.0.0.1:8000/callback` as a redirect URI in the [Dashboard](https://developer.spotify.com/dashboard).
 
 ## Credits
 
-- Original library: [CloakerSmoker/Spotify.ahk](https://github.com/CloakerSmoker/Spotify.ahk)
+- [CloakerSmoker/Spotify.ahk](https://github.com/CloakerSmoker/Spotify.ahk)
 - [JSON.ahk](https://github.com/thqby/ahk2_lib) (thqby / HotKeyIt)
 
 ## License

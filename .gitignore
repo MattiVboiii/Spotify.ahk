@@ -12,3 +12,6 @@ ehthumbs.db
 *.ahk.bak
 .vscode/
 .idea/
+
+# Personal hotkey / settings (copy from Config.example.ahk)
+Config.ahk

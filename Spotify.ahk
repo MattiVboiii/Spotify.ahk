@@ -1,20 +1,282 @@
 #Requires AutoHotkey v2.0
 #MaxThreads 4
 
+; =============================================================================
+; Spotify Web API (playback + volume only) — PKCE auth
+; =============================================================================
+; Usage:
+;   spoofy := Spotify()
+;   spoofy.Player.SetVolume(50)
+;   spoofy.Player.PlayPause()
+; =============================================================================
+
 class Spotify {
 	static SHOULD_CHECK_CONNECTION_BEFORE_REQUEST := false
 
 	__New() {
-		this.Util := Util(this)
-		this.Player := Player(this)
-		this.CurrentUser := user({}, this)
+		this.Util := Spotify.Util(this)
+		this.Player := Spotify.Player(this)
+		this.CurrentUser := Spotify.User({}, this)
 		try {
-			me := this.Util.CustomCall("GET", "me")
-			if me
-				this.CurrentUser := user(JSON.Load(me), this)
+			Me := this.Util.CustomCall("GET", "me")
+			if Me
+				this.CurrentUser := Spotify.User(JSON.Load(Me), this)
 		}
 	}
 
+
+	; -------------------------------------------------------------------------
+	; HTTP + retries
+	; -------------------------------------------------------------------------
+	class Util {
+		static MAX_RETRY := 3
+
+		__New(Parent) {
+			this.Parent := Parent
+			this.PKCE := Spotify.PKCE()
+			if !this.PKCE.HasSavedTokens() {
+				try Legacy := RegRead("HKCU\Software\SpotifyAHK", "refreshToken")
+				catch
+					Legacy := ""
+				if Legacy
+					MsgBox("Spotify.ahk: Old install detected — please re-authorize to migrate to PKCE.")
+			}
+		}
+
+		IsInternetConnected(Url := "http://api.spotify.com/v1/") {
+			return DllCall("Wininet.dll\InternetCheckConnection", "Str", Url, "UInt", 1, "UInt", 0)
+		}
+
+		CustomCall(Method, Url, Body := "", NoErr := false) {
+			if Spotify.SHOULD_CHECK_CONNECTION_BEFORE_REQUEST && !this.IsInternetConnected()
+				throw Error("No internet connection", -1, "offline")
+
+			if !(InStr(Url, "https://api.spotify.com") || InStr(Url, "https://accounts.spotify.com/api/"))
+				Url := "https://api.spotify.com/v1/" Url
+
+			LastError := "", LastStatus := 0
+			Loop Spotify.Util.MAX_RETRY {
+				try {
+					Req := ComObject("WinHttp.WinHttpRequest.5.1")
+					Req.Open(Method, Url, false)
+					this.PKCE.AuthenticateRequest(Req)
+					if Body != ""
+						Req.SetRequestHeader("Content-Type", "application/json")
+					Req.Send(Body)
+					Status := Req.Status
+					LastStatus := Status
+				} catch as err {
+					LastError := err.Message
+					if A_Index < Spotify.Util.MAX_RETRY {
+						Sleep(200 * A_Index)
+						continue
+					}
+					throw Error(err.Message, -1, "offline")
+				}
+
+				if Status = 401 && A_Index < Spotify.Util.MAX_RETRY {
+					try this.PKCE.RequestAccessFromRefreshToken()
+					catch {
+						this.PKCE.Authorized := false
+						this.PKCE.ClearSavedTokens()
+						this.PKCE.RequestUserAuthorization()
+					}
+					continue
+				}
+
+				if Status = 429 && A_Index < Spotify.Util.MAX_RETRY {
+					try RetryAfter := Integer(Req.GetResponseHeader("Retry-After"))
+					catch
+						RetryAfter := 1
+					Sleep(Clamp(RetryAfter, 1, 10) * 1000)
+					continue
+				}
+
+				if (Status = 500 || Status = 502 || Status = 503 || Status = 504) && A_Index < Spotify.Util.MAX_RETRY {
+					Sleep(300 * A_Index)
+					continue
+				}
+
+				if Status > 299 && !NoErr
+					throw Error(FormatHttpError(Req, Method, Url), -1, Status)
+
+				return Req.ResponseText
+			}
+
+			Extra := LastStatus = 429 ? 429 : (LastStatus > 0 ? LastStatus : "offline")
+			throw Error(LastError != "" ? LastError : "Spotify.ahk: Request failed after retries", -1, Extra)
+		}
+	}
+
+
+	; -------------------------------------------------------------------------
+	; Player endpoints
+	; -------------------------------------------------------------------------
+	class Player {
+		__New(Parent) {
+			this.Parent := Parent
+		}
+
+		Call(Method, Path, Body := "") {
+			return this.Parent.Util.CustomCall(Method, Path, Body)
+		}
+
+		; true = saved, false = unsaved, "" = nothing playing
+		ToggleSaveCurrentlyPlaying() {
+			Info := this.GetCurrentPlaybackInfo()
+			if !Info || !IsObject(Info.Track) || !Info.Track.id
+				return ""
+			if Info.Track.IsSaved {
+				Info.Track.UnSave()
+				return false
+			}
+			Info.Track.Save()
+			return true
+		}
+
+		SetVolume(Percent) {
+			try Percent := Integer(Percent)
+			catch
+				Percent := 0
+			return this.Call("PUT", "me/player/volume?volume_percent=" Clamp(Percent, 0, 100))
+		}
+
+		GetCurrentPlaybackInfo() {
+			Resp := ParseJsonObject(this.Call("GET", "me/player"))
+			if !Resp
+				return false
+			Resp.Track := Spotify.Track(Resp.HasOwnProp("item") ? Resp.item : "", this.Parent)
+			Resp.Device := Spotify.Device(Resp.HasOwnProp("device") ? Resp.device : "", this.Parent)
+			if !Resp.HasOwnProp("progress_ms")
+				Resp.progress_ms := 0
+			return Resp
+		}
+
+		GetDevices() {
+			Resp := ParseJsonObject(this.Call("GET", "me/player/devices"))
+			if !Resp || !Resp.HasOwnProp("devices") || !IsObject(Resp.devices)
+				return []
+			return Resp.devices
+		}
+
+		TransferPlayback(DeviceId, Play := true) {
+			if DeviceId = ""
+				throw Error("Spotify.ahk: Missing device id", -1, "no_device")
+			Body := '{"device_ids":["' DeviceId '"],"play":' (Play ? "true" : "false") "}"
+			return this.Call("PUT", "me/player", Body)
+		}
+
+		SeekTo(PositionMs) {
+			try PositionMs := Integer(PositionMs)
+			catch
+				PositionMs := 0
+			return this.Call("PUT", "me/player/seek?position_ms=" Max(PositionMs, 0))
+		}
+
+		SetRepeatMode(Mode) {
+			State := Mode = 1 ? "track" : (Mode = 2 ? "context" : "off")
+			return this.Call("PUT", "me/player/repeat?state=" State)
+		}
+
+		SetShuffle(Mode) {
+			return this.Call("PUT", "me/player/shuffle?state=" (Mode ? "true" : "false"))
+		}
+
+		NextTrack() {
+			return this.Call("POST", "me/player/next")
+		}
+
+		PreviousTrack() {
+			return this.Call("POST", "me/player/previous")
+		}
+
+		PausePlayback() {
+			return this.Call("PUT", "me/player/pause")
+		}
+
+		ResumePlayback() {
+			return this.Call("PUT", "me/player/play")
+		}
+
+		PlayPause() {
+			Info := this.GetCurrentPlaybackInfo()
+			if !Info
+				return false
+			Playing := Info.HasOwnProp("is_playing") ? Info.is_playing : false
+			return Playing ? this.PausePlayback() : this.ResumePlayback()
+		}
+	}
+
+
+	; -------------------------------------------------------------------------
+	; Models
+	; -------------------------------------------------------------------------
+	class Track {
+		__New(Obj, Parent := "") {
+			this.SpotifyObj := Parent
+			this.id := "", this.name := "", this.artist := "", this.duration_ms := 0
+			if !IsObject(Obj)
+				return
+			this.id := Obj.HasOwnProp("id") ? Obj.id : ""
+			this.name := Obj.HasOwnProp("name") ? Obj.name : ""
+			try this.duration_ms := Obj.HasOwnProp("duration_ms") ? Integer(Obj.duration_ms) : 0
+			catch
+				this.duration_ms := 0
+			if Obj.HasOwnProp("artists") && IsObject(Obj.artists) && Obj.artists.Length >= 1 {
+				First := Obj.artists[1]
+				if IsObject(First) && First.HasOwnProp("name")
+					this.artist := First.name
+			}
+		}
+
+		IsSaved {
+			get {
+				if this.id = ""
+					return false
+				try
+					return (this.SpotifyObj.Util.CustomCall("GET", "me/tracks/contains?ids=" this.id) ~= "true")
+				catch
+					return false
+			}
+		}
+
+		Save() {
+			return this.id = "" ? false : this.SpotifyObj.Util.CustomCall("PUT", "me/tracks?ids=" this.id)
+		}
+
+		UnSave() {
+			return this.id = "" ? false : this.SpotifyObj.Util.CustomCall("DELETE", "me/tracks?ids=" this.id)
+		}
+	}
+
+	class Device {
+		__New(Obj, Parent := "") {
+			this.SpotifyObj := Parent
+			this.id := "", this.name := "", this.volume := ""
+			if !IsObject(Obj)
+				return
+			this.id := Obj.HasOwnProp("id") ? Obj.id : ""
+			this.name := Obj.HasOwnProp("name") ? Obj.name : ""
+			this.volume := Obj.HasOwnProp("volume_percent") ? Obj.volume_percent : ""
+		}
+	}
+
+	class User {
+		__New(Obj, Parent := "") {
+			this.SpotifyObj := Parent
+			this.id := "", this.name := "", this.subscriptionLevel := ""
+			if !IsObject(Obj)
+				return
+			this.id := Obj.HasOwnProp("id") ? Obj.id : ""
+			this.name := Obj.HasOwnProp("display_name") ? Obj.display_name : ""
+			this.subscriptionLevel := Obj.HasOwnProp("product") ? Obj.product : ""
+		}
+	}
+
+
+	; -------------------------------------------------------------------------
+	; PKCE auth + Credential Manager
+	; -------------------------------------------------------------------------
 	class PKCE {
 		static CLIENT_ID := "9fe26296bb7b4330ac59339efd2742b0"
 		static CREDENTIAL_NAME := "Spotify.ahk"
@@ -22,123 +284,6 @@ class Spotify {
 		static SCOPES := "user-modify-playback-state user-read-currently-playing "
 			. "user-read-playback-state user-read-private "
 			. "user-library-read user-library-modify"
-
-		class Crypto {
-			static BCRYPT_RNG_ALG_HANDLE := 0x00000081
-			static BCRYPT_SHA256_ALG_HANDLE := 0x00000041
-			static CRYPT_STRING_BASE64 := 0x1
-			static CRYPT_STRING_NOCRLF := 0x40000000
-			static hHeap := DllCall("kernel32.dll\GetProcessHeap", "Ptr")
-
-			Allocate(Size) {
-				return DllCall("kernel32.dll\HeapAlloc", "Ptr", Spotify.PKCE.Crypto.hHeap, "UInt", 0, "Ptr", Size, "Ptr")
-			}
-
-			Free(Ptr) {
-				DllCall("kernel32.dll\HeapFree", "Ptr", Spotify.PKCE.Crypto.hHeap, "UInt", 0, "Ptr", Ptr)
-			}
-
-			GenerateRandomString(Length) {
-				buf := Buffer(Length, 0)
-				DllCall("bcrypt.dll\BCryptGenRandom", "Ptr", Spotify.PKCE.Crypto.BCRYPT_RNG_ALG_HANDLE, "Ptr", buf, "UInt", Length, "UInt", 0)
-
-				Result := ""
-				Alphabet := "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
-				Loop Length {
-					Value := NumGet(buf, A_Index - 1, "UChar")
-					Result .= SubStr(Alphabet, Mod(Value, 62) + 1, 1)
-				}
-				return Result
-			}
-
-			SHA2_256(pInput, InputSize) {
-				hHash := 0
-				DllCall("bcrypt.dll\BCryptCreateHash"
-					, "Ptr", Spotify.PKCE.Crypto.BCRYPT_SHA256_ALG_HANDLE
-					, "Ptr*", &hHash
-					, "Ptr", 0, "Ptr", 0
-					, "Ptr", 0, "Ptr", 0, "UInt", 0)
-
-				DllCall("bcrypt.dll\BCryptHashData"
-					, "Ptr", hHash
-					, "Ptr", pInput
-					, "UInt", InputSize
-					, "UInt", 0)
-
-				pResult := this.Allocate(32)
-				DllCall("bcrypt.dll\BCryptFinishHash"
-					, "Ptr", hHash
-					, "Ptr", pResult
-					, "UInt", 32
-					, "UInt", 0)
-
-				DllCall("bcrypt.dll\BCryptDestroyHash", "Ptr", hHash)
-				return pResult
-			}
-
-			Base64Encode(pInput, InputSize) {
-				Flags := Spotify.PKCE.Crypto.CRYPT_STRING_BASE64 | Spotify.PKCE.Crypto.CRYPT_STRING_NOCRLF
-				ResultSize := 0
-				DllCall("crypt32.dll\CryptBinaryToStringW"
-					, "Ptr", pInput
-					, "UInt", InputSize
-					, "UInt", Flags
-					, "Ptr", 0
-					, "UInt*", &ResultSize)
-
-				ResultBuffer := Buffer(ResultSize * 2, 0)
-				DllCall("crypt32.dll\CryptBinaryToStringW"
-					, "Ptr", pInput
-					, "UInt", InputSize
-					, "UInt", Flags
-					, "Ptr", ResultBuffer
-					, "UInt*", &ResultSize)
-
-				return StrGet(ResultBuffer, "UTF-16")
-			}
-		}
-
-		; Credential Manager helpers (0BSD — Copyright (c) 2023 Philip Taylor)
-		class CredentialStore {
-			static CredWrite(name, username, password) {
-				nameBuf := Buffer(StrPut(name, "UTF-16"))
-				StrPut(name, nameBuf, "UTF-16")
-				userBuf := Buffer(StrPut(username, "UTF-16"))
-				StrPut(username, userBuf, "UTF-16")
-
-				cbPassword := StrLen(password) * 2
-				passBuf := Buffer(cbPassword + 2, 0)
-				StrPut(password, passBuf, "UTF-16")
-
-				cred := Buffer(24 + A_PtrSize * 7, 0)
-				NumPut("UInt", 1, cred, 4)                           ; Type = CRED_TYPE_GENERIC
-				NumPut("Ptr", nameBuf.Ptr, cred, 8)                  ; TargetName
-				NumPut("UInt", cbPassword, cred, 16 + A_PtrSize * 2) ; CredentialBlobSize
-				NumPut("Ptr", passBuf.Ptr, cred, 16 + A_PtrSize * 3) ; CredentialBlob
-				NumPut("UInt", 3, cred, 16 + A_PtrSize * 4)          ; Persist = CRED_PERSIST_ENTERPRISE
-				NumPut("Ptr", userBuf.Ptr, cred, 24 + A_PtrSize * 6) ; UserName
-
-				return DllCall("Advapi32.dll\CredWriteW", "Ptr", cred, "UInt", 0, "Int")
-			}
-
-			static CredDelete(name) {
-				return DllCall("Advapi32.dll\CredDeleteW", "WStr", name, "UInt", 1, "UInt", 0, "Int")
-			}
-
-			static CredRead(name) {
-				pCred := 0
-				DllCall("Advapi32.dll\CredReadW", "Str", name, "UInt", 1, "UInt", 0, "Ptr*", &pCred, "Int")
-				if !pCred
-					return false
-
-				nameOut := StrGet(NumGet(pCred, 8, "Ptr"), "UTF-16")
-				username := StrGet(NumGet(pCred, 24 + A_PtrSize * 6, "Ptr"), "UTF-16")
-				len := NumGet(pCred, 16 + A_PtrSize * 2, "UInt")
-				password := StrGet(NumGet(pCred, 16 + A_PtrSize * 3, "Ptr"), len / 2, "UTF-16")
-				DllCall("Advapi32.dll\CredFree", "Ptr", pCred)
-				return {name: nameOut, username: username, password: password}
-			}
-		}
 
 		__New() {
 			this.Crypto := Spotify.PKCE.Crypto()
@@ -150,15 +295,12 @@ class Spotify {
 
 		GenerateCodeChallenge() {
 			this.CodeVerifier := this.Crypto.GenerateRandomString(128)
-
-			CodeVerifierBuffer := Buffer(StrPut(this.CodeVerifier, "UTF-8"))
-			StrPut(this.CodeVerifier, CodeVerifierBuffer, "UTF-8")
-			InputSize := StrPut(this.CodeVerifier, "UTF-8") - 1
-
-			pHash := this.Crypto.SHA2_256(CodeVerifierBuffer.Ptr, InputSize)
-			this.CodeChallenge := this.Crypto.Base64Encode(pHash, 32)
-			this.CodeChallenge := StrReplace(StrReplace(StrReplace(this.CodeChallenge, "=", ""), "+", "-"), "/", "_")
+			Buf := Buffer(StrPut(this.CodeVerifier, "UTF-8"))
+			StrPut(this.CodeVerifier, Buf, "UTF-8")
+			pHash := this.Crypto.SHA2_256(Buf.Ptr, StrPut(this.CodeVerifier, "UTF-8") - 1)
+			Challenge := this.Crypto.Base64Encode(pHash, 32)
 			this.Crypto.Free(pHash)
+			this.CodeChallenge := StrReplace(StrReplace(StrReplace(Challenge, "=", ""), "+", "-"), "/", "_")
 			return this.CodeChallenge
 		}
 
@@ -177,35 +319,33 @@ class Spotify {
 			Credential := Spotify.PKCE.CredentialStore.CredRead(Spotify.PKCE.CREDENTIAL_NAME)
 			if !IsObject(Credential) || Credential.password = ""
 				throw Error("Spotify.ahk: No saved tokens")
-
-			try
-				Tokens := JSON.Load(Credential.password)
+			try Tokens := JSON.Load(Credential.password)
 			catch
 				throw Error("Spotify.ahk: Corrupt saved tokens")
-
 			if !IsObject(Tokens)
 				|| !Tokens.HasOwnProp("AccessToken") || Tokens.AccessToken = ""
 				|| !Tokens.HasOwnProp("RefreshToken") || Tokens.RefreshToken = ""
 				|| !Tokens.HasOwnProp("AccessTokenExpiration") || Tokens.AccessTokenExpiration = ""
 				throw Error("Spotify.ahk: Incomplete saved tokens")
-
 			this.AccessToken := Tokens.AccessToken
 			this.AccessTokenExpiration := Tokens.AccessTokenExpiration
 			this.RefreshToken := Tokens.RefreshToken
 		}
 
 		SaveTokens() {
-			Tokens := {
-				AccessToken: this.AccessToken,
-				AccessTokenExpiration: this.AccessTokenExpiration,
-				RefreshToken: this.RefreshToken
-			}
-			Spotify.PKCE.CredentialStore.CredWrite(Spotify.PKCE.CREDENTIAL_NAME, A_UserName, JSON.Dump(Tokens))
+			Spotify.PKCE.CredentialStore.CredWrite(
+				Spotify.PKCE.CREDENTIAL_NAME,
+				A_UserName,
+				JSON.Dump({
+					AccessToken: this.AccessToken,
+					AccessTokenExpiration: this.AccessTokenExpiration,
+					RefreshToken: this.RefreshToken
+				})
+			)
 		}
 
 		SetAccessTokenExpiration(ExpiresInSeconds) {
-			try
-				Seconds := Integer(ExpiresInSeconds)
+			try Seconds := Integer(ExpiresInSeconds)
 			catch
 				Seconds := 3600
 			if Seconds < 30
@@ -223,30 +363,27 @@ class Spotify {
 		}
 
 		RequestTokens(ErrorMessage, Parameters) {
-			BodyParameters := "client_id=" Spotify.PKCE.CLIENT_ID "&"
+			Body := "client_id=" Spotify.PKCE.CLIENT_ID "&"
 			for Key, Value in Parameters.OwnProps()
-				BodyParameters .= Key "=" Value "&"
-			BodyParameters := SubStr(BodyParameters, 1, -1)
+				Body .= Key "=" Value "&"
+			Body := SubStr(Body, 1, -1)
 
-			Request := ComObject("WinHttp.WinHttpRequest.5.1")
-			Request.Open("POST", "https://accounts.spotify.com/api/token", false)
-			Request.SetRequestHeader("Content-Type", "application/x-www-form-urlencoded")
-			Request.Send(BodyParameters)
+			Req := ComObject("WinHttp.WinHttpRequest.5.1")
+			Req.Open("POST", "https://accounts.spotify.com/api/token", false)
+			Req.SetRequestHeader("Content-Type", "application/x-www-form-urlencoded")
+			Req.Send(Body)
 
-			if Request.Status != 200
-				throw Error("Spotify.ahk: " ErrorMessage ": status " Request.Status ", response: " Request.ResponseText)
+			if Req.Status != 200
+				throw Error("Spotify.ahk: " ErrorMessage ": status " Req.Status ", response: " Req.ResponseText)
 
-			Response := JSON.Load(Request.ResponseText)
+			Response := JSON.Load(Req.ResponseText)
 			if !IsObject(Response) || !Response.HasOwnProp("access_token") || Response.access_token = ""
 				throw Error("Spotify.ahk: " ErrorMessage ": missing access_token")
 
 			this.AccessToken := Response.access_token
 			this.SetAccessTokenExpiration(Response.HasOwnProp("expires_in") ? Response.expires_in : 3600)
-
 			if Response.HasOwnProp("refresh_token") && Response.refresh_token
 				this.RefreshToken := Response.refresh_token
-
-			; Initial auth must yield a refresh token; refresh responses may omit it
 			if this.RefreshToken = ""
 				throw Error("Spotify.ahk: " ErrorMessage ": missing refresh_token")
 
@@ -256,17 +393,14 @@ class Spotify {
 
 		RequestUserAuthorization() {
 			this.GenerateCodeChallenge()
-
-			authUrl := "https://accounts.spotify.com/en/authorize"
+			AuthUrl := "https://accounts.spotify.com/en/authorize"
 				. "?client_id=" Spotify.PKCE.CLIENT_ID
 				. "&response_type=code"
 				. "&code_challenge_method=S256"
 				. "&code_challenge=" this.CodeChallenge
 				. "&redirect_uri=" UriEncode(Spotify.PKCE.REDIRECT_URI)
 				. "&scope=" UriEncode(Spotify.PKCE.SCOPES)
-
-			this.AuthorizationCode := OAuthCallback.WaitForCode(8000, 5 * 60 * 1000, () => Run(authUrl))
-
+			this.AuthorizationCode := OAuthCallback.WaitForCode(8000, 5 * 60 * 1000, () => Run(AuthUrl))
 			this.RequestTokens("Could not complete initial web authorization", {
 				grant_type: "authorization_code",
 				code: this.AuthorizationCode,
@@ -286,17 +420,17 @@ class Spotify {
 
 		AuthenticateRequest(Request) {
 			if !this.Authorized {
-				loaded := false
+				Loaded := false
 				if this.HasSavedTokens() {
 					try {
 						this.LoadSavedTokens()
 						this.Authorized := true
-						loaded := true
+						Loaded := true
 					} catch {
 						this.ClearSavedTokens()
 					}
 				}
-				if !loaded
+				if !Loaded
 					this.RequestUserAuthorization()
 			}
 
@@ -312,276 +446,141 @@ class Spotify {
 
 			if this.AccessToken = ""
 				throw Error("Spotify.ahk: Missing access token after authentication")
-
 			Request.SetRequestHeader("Authorization", "Bearer " this.AccessToken)
 		}
-	}
-}
 
-class Util {
-	static MAX_RETRY := 3
+		class Crypto {
+			static BCRYPT_RNG_ALG_HANDLE := 0x00000081
+			static BCRYPT_SHA256_ALG_HANDLE := 0x00000041
+			static CRYPT_STRING_BASE64 := 0x1
+			static CRYPT_STRING_NOCRLF := 0x40000000
+			static hHeap := DllCall("kernel32.dll\GetProcessHeap", "Ptr")
 
-	__New(ParentObject) {
-		this.ParentObject := ParentObject
-		this.PKCE := Spotify.PKCE()
-
-		if !this.PKCE.HasSavedTokens() {
-			try LegacyRefreshToken := RegRead("HKCU\Software\SpotifyAHK", "refreshToken")
-			catch
-				LegacyRefreshToken := ""
-			if LegacyRefreshToken
-				MsgBox("Spotify.ahk: Old install detected — please re-authorize to migrate to PKCE.")
-		}
-	}
-
-	IsInternetConnected(CheckURL := "http://api.spotify.com/v1/") {
-		return DllCall("Wininet.dll\InternetCheckConnection", "Str", CheckURL, "UInt", 1, "UInt", 0)
-	}
-
-	CustomCall(method, url, body := "", noErr := false) {
-		if Spotify.SHOULD_CHECK_CONNECTION_BEFORE_REQUEST && !this.IsInternetConnected()
-			throw Error("No internet connection")
-
-		if !(InStr(url, "https://api.spotify.com") || InStr(url, "https://accounts.spotify.com/api/"))
-			url := "https://api.spotify.com/v1/" url
-
-		LastError := ""
-		Loop Util.MAX_RETRY {
-			try {
-				Req := ComObject("WinHttp.WinHttpRequest.5.1")
-				Req.Open(method, url, false)
-				this.PKCE.AuthenticateRequest(Req)
-				Req.Send(body)
-				Status := Req.Status
-			} catch as err {
-				LastError := err.Message
-				if A_Index < Util.MAX_RETRY {
-					Sleep(200 * A_Index)
-					continue
-				}
-				throw err
+			Allocate(Size) {
+				return DllCall("kernel32.dll\HeapAlloc", "Ptr", Spotify.PKCE.Crypto.hHeap, "UInt", 0, "Ptr", Size, "Ptr")
 			}
 
-			if Status = 401 && A_Index < Util.MAX_RETRY {
-				try this.PKCE.RequestAccessFromRefreshToken()
-				catch {
-					this.PKCE.Authorized := false
-					this.PKCE.ClearSavedTokens()
-					this.PKCE.RequestUserAuthorization()
-				}
-				continue
+			Free(Ptr) {
+				DllCall("kernel32.dll\HeapFree", "Ptr", Spotify.PKCE.Crypto.hHeap, "UInt", 0, "Ptr", Ptr)
 			}
 
-			if Status = 429 && A_Index < Util.MAX_RETRY {
-				RetryAfter := 1
-				try RetryAfter := Integer(Req.GetResponseHeader("Retry-After"))
-				catch
-					RetryAfter := 1
-				Sleep(Clamp(RetryAfter, 1, 10) * 1000)
-				continue
+			GenerateRandomString(Length) {
+				Buf := Buffer(Length, 0)
+				DllCall("bcrypt.dll\BCryptGenRandom", "Ptr", Spotify.PKCE.Crypto.BCRYPT_RNG_ALG_HANDLE, "Ptr", Buf, "UInt", Length, "UInt", 0)
+				Result := "", Alphabet := "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+				Loop Length
+					Result .= SubStr(Alphabet, Mod(NumGet(Buf, A_Index - 1, "UChar"), 62) + 1, 1)
+				return Result
 			}
 
-			; Transient server errors
-			if (Status = 500 || Status = 502 || Status = 503 || Status = 504) && A_Index < Util.MAX_RETRY {
-				Sleep(300 * A_Index)
-				continue
+			SHA2_256(pInput, InputSize) {
+				hHash := 0
+				DllCall("bcrypt.dll\BCryptCreateHash", "Ptr", Spotify.PKCE.Crypto.BCRYPT_SHA256_ALG_HANDLE, "Ptr*", &hHash, "Ptr", 0, "Ptr", 0, "Ptr", 0, "Ptr", 0, "UInt", 0)
+				DllCall("bcrypt.dll\BCryptHashData", "Ptr", hHash, "Ptr", pInput, "UInt", InputSize, "UInt", 0)
+				pResult := this.Allocate(32)
+				DllCall("bcrypt.dll\BCryptFinishHash", "Ptr", hHash, "Ptr", pResult, "UInt", 32, "UInt", 0)
+				DllCall("bcrypt.dll\BCryptDestroyHash", "Ptr", hHash)
+				return pResult
 			}
 
-			if Status > 299 && !noErr
-				throw Error(FormatHttpError(Req, method, url), -1, "HTTP response code not 2xx")
-
-			return Req.ResponseText
+			Base64Encode(pInput, InputSize) {
+				Flags := Spotify.PKCE.Crypto.CRYPT_STRING_BASE64 | Spotify.PKCE.Crypto.CRYPT_STRING_NOCRLF
+				ResultSize := 0
+				DllCall("crypt32.dll\CryptBinaryToStringW", "Ptr", pInput, "UInt", InputSize, "UInt", Flags, "Ptr", 0, "UInt*", &ResultSize)
+				ResultBuffer := Buffer(ResultSize * 2, 0)
+				DllCall("crypt32.dll\CryptBinaryToStringW", "Ptr", pInput, "UInt", InputSize, "UInt", Flags, "Ptr", ResultBuffer, "UInt*", &ResultSize)
+				return StrGet(ResultBuffer, "UTF-16")
+			}
 		}
 
-		throw Error(LastError != "" ? LastError : "Spotify.ahk: Request failed after retries")
-	}
-}
+		; Credential Manager helpers (0BSD — Copyright (c) 2023 Philip Taylor)
+		class CredentialStore {
+			static CredWrite(Name, Username, Password) {
+				NameBuf := Buffer(StrPut(Name, "UTF-16")), StrPut(Name, NameBuf, "UTF-16")
+				UserBuf := Buffer(StrPut(Username, "UTF-16")), StrPut(Username, UserBuf, "UTF-16")
+				cbPassword := StrLen(Password) * 2
+				PassBuf := Buffer(cbPassword + 2, 0), StrPut(Password, PassBuf, "UTF-16")
 
-class Player {
-	__New(ParentObject) {
-		this.ParentObject := ParentObject
-	}
+				Cred := Buffer(24 + A_PtrSize * 7, 0)
+				NumPut("UInt", 1, Cred, 4)                           ; CRED_TYPE_GENERIC
+				NumPut("Ptr", NameBuf.Ptr, Cred, 8)
+				NumPut("UInt", cbPassword, Cred, 16 + A_PtrSize * 2)
+				NumPut("Ptr", PassBuf.Ptr, Cred, 16 + A_PtrSize * 3)
+				NumPut("UInt", 3, Cred, 16 + A_PtrSize * 4)          ; CRED_PERSIST_ENTERPRISE
+				NumPut("Ptr", UserBuf.Ptr, Cred, 24 + A_PtrSize * 6)
+				return DllCall("Advapi32.dll\CredWriteW", "Ptr", Cred, "UInt", 0, "Int")
+			}
 
-	; true = saved, false = unsaved, "" = nothing playing
-	ToggleSaveCurrentlyPlaying() {
-		Info := this.GetCurrentPlaybackInfo()
-		if !Info || !IsObject(Info.Track) || !Info.Track.id
-			return ""
-		if Info.Track.IsSaved {
-			Info.Track.UnSave()
-			return false
-		}
-		Info.Track.Save()
-		return true
-	}
+			static CredDelete(Name) {
+				return DllCall("Advapi32.dll\CredDeleteW", "WStr", Name, "UInt", 1, "UInt", 0, "Int")
+			}
 
-	SetVolume(volume) {
-		try
-			volume := Integer(volume)
-		catch
-			volume := 0
-		volume := Clamp(volume, 0, 100)
-		return this.ParentObject.Util.CustomCall("PUT", "me/player/volume?volume_percent=" volume)
-	}
-
-	GetCurrentPlaybackInfo() {
-		try
-			ResponseText := this.ParentObject.Util.CustomCall("GET", "me/player")
-		catch
-			return false
-
-		if !ResponseText
-			return false
-
-		try
-			Resp := JSON.Load(ResponseText)
-		catch
-			return false
-
-		if !IsObject(Resp)
-			return false
-
-		Resp.Track := track(Resp.HasOwnProp("item") ? Resp.item : "", this.ParentObject)
-		Resp.Device := device(Resp.HasOwnProp("device") ? Resp.device : "", this.ParentObject)
-		return Resp
-	}
-
-	SetRepeatMode(mode) {
-		State := (mode = 1 ? "track" : (mode = 2 ? "context" : "off"))
-		return this.ParentObject.Util.CustomCall("PUT", "me/player/repeat?state=" State)
-	}
-
-	SetShuffle(mode) {
-		return this.ParentObject.Util.CustomCall("PUT", "me/player/shuffle?state=" (mode ? "true" : "false"))
-	}
-
-	NextTrack() {
-		return this.ParentObject.Util.CustomCall("POST", "me/player/next")
-	}
-
-	PreviousTrack() {
-		return this.ParentObject.Util.CustomCall("POST", "me/player/previous")
-	}
-
-	PausePlayback() {
-		return this.ParentObject.Util.CustomCall("PUT", "me/player/pause")
-	}
-
-	ResumePlayback() {
-		return this.ParentObject.Util.CustomCall("PUT", "me/player/play")
-	}
-
-	PlayPause() {
-		Info := this.GetCurrentPlaybackInfo()
-		if !Info
-			return false
-		Playing := Info.HasOwnProp("is_playing") ? Info.is_playing : false
-		return Playing ? this.PausePlayback() : this.ResumePlayback()
-	}
-}
-
-class track {
-	__New(ResponseTrackObj, Parent := "") {
-		this.SpotifyObj := Parent
-		this.id := ""
-		this.name := ""
-		if !IsObject(ResponseTrackObj)
-			return
-		this.id := ResponseTrackObj.HasOwnProp("id") ? ResponseTrackObj.id : ""
-		this.name := ResponseTrackObj.HasOwnProp("name") ? ResponseTrackObj.name : ""
-	}
-
-	IsSaved {
-		get {
-			if this.id = ""
-				return false
-			try
-				return (this.SpotifyObj.Util.CustomCall("GET", "me/tracks/contains?ids=" this.id) ~= "true")
-			catch
-				return false
+			static CredRead(Name) {
+				pCred := 0
+				DllCall("Advapi32.dll\CredReadW", "Str", Name, "UInt", 1, "UInt", 0, "Ptr*", &pCred, "Int")
+				if !pCred
+					return false
+				NameOut := StrGet(NumGet(pCred, 8, "Ptr"), "UTF-16")
+				Username := StrGet(NumGet(pCred, 24 + A_PtrSize * 6, "Ptr"), "UTF-16")
+				Len := NumGet(pCred, 16 + A_PtrSize * 2, "UInt")
+				Password := StrGet(NumGet(pCred, 16 + A_PtrSize * 3, "Ptr"), Len / 2, "UTF-16")
+				DllCall("Advapi32.dll\CredFree", "Ptr", pCred)
+				return { name: NameOut, username: Username, password: Password }
+			}
 		}
 	}
-
-	Save() {
-		if this.id = ""
-			return false
-		return this.SpotifyObj.Util.CustomCall("PUT", "me/tracks?ids=" this.id)
-	}
-
-	UnSave() {
-		if this.id = ""
-			return false
-		return this.SpotifyObj.Util.CustomCall("DELETE", "me/tracks?ids=" this.id)
-	}
 }
 
-class device {
-	__New(Devicejson, Parent := "") {
-		this.SpotifyObj := Parent
-		this.id := ""
-		this.name := ""
-		this.volume := ""
-		if !IsObject(Devicejson)
-			return
-		this.id := Devicejson.HasOwnProp("id") ? Devicejson.id : ""
-		this.name := Devicejson.HasOwnProp("name") ? Devicejson.name : ""
-		this.volume := Devicejson.HasOwnProp("volume_percent") ? Devicejson.volume_percent : ""
-	}
+
+; =============================================================================
+; Shared helpers
+; =============================================================================
+
+ParseJsonObject(Text) {
+	if !Text
+		return false
+	try Parsed := JSON.Load(Text)
+	catch
+		return false
+	return IsObject(Parsed) ? Parsed : false
 }
 
-class user {
-	__New(Userjson, Parent := "") {
-		this.SpotifyObj := Parent
-		this.id := ""
-		this.name := ""
-		this.subscriptionLevel := ""
-		if !IsObject(Userjson)
-			return
-		this.id := Userjson.HasOwnProp("id") ? Userjson.id : ""
-		this.name := Userjson.HasOwnProp("display_name") ? Userjson.display_name : ""
-		this.subscriptionLevel := Userjson.HasOwnProp("product") ? Userjson.product : ""
-	}
-}
-
-UriEncode(str) {
-	out := ""
-	buf := Buffer(StrPut(str, "UTF-8"))
-	StrPut(str, buf, "UTF-8")
-	Loop buf.Size - 1 {
-		b := NumGet(buf, A_Index - 1, "UChar")
-		ch := Chr(b)
-		if (b >= 0x41 && b <= 0x5A) || (b >= 0x61 && b <= 0x7A) || (b >= 0x30 && b <= 0x39) || InStr("-_.~", ch)
-			out .= ch
+UriEncode(Str) {
+	Out := "", Buf := Buffer(StrPut(Str, "UTF-8"))
+	StrPut(Str, Buf, "UTF-8")
+	Loop Buf.Size - 1 {
+		B := NumGet(Buf, A_Index - 1, "UChar"), Ch := Chr(B)
+		if (B >= 0x41 && B <= 0x5A) || (B >= 0x61 && B <= 0x7A) || (B >= 0x30 && B <= 0x39) || InStr("-_.~", Ch)
+			Out .= Ch
 		else
-			out .= Format("%{:02X}", b)
+			Out .= Format("%{:02X}", B)
 	}
-	return out
+	return Out
 }
 
-Clamp(Value, Min, Max) {
-	if Value < Min
-		return Min
-	if Value > Max
-		return Max
+Clamp(Value, MinVal, MaxVal) {
+	if Value < MinVal
+		return MinVal
+	if Value > MaxVal
+		return MaxVal
 	return Value
 }
 
-FormatHttpError(Req, method, url) {
+FormatHttpError(Req, Method, Url) {
 	try {
-		parsed := JSON.Load(Req.ResponseText)
-		if IsObject(parsed) && parsed.HasOwnProp("error") {
-			err := parsed.error
-			msg := ""
-			if err.HasOwnProp("reason") && err.reason
-				msg .= err.reason ": "
-			if err.HasOwnProp("message")
-				msg .= err.message
-			if msg
-				return msg
+		Parsed := JSON.Load(Req.ResponseText)
+		if IsObject(Parsed) && Parsed.HasOwnProp("error") {
+			Err := Parsed.error, Msg := ""
+			if Err.HasOwnProp("reason") && Err.reason
+				Msg .= Err.reason ": "
+			if Err.HasOwnProp("message")
+				Msg .= Err.message
+			if Msg
+				return Msg
 		}
 	}
 	try
-		return Req.Status ' not 2xx for request "' method ":" url '".'
+		return Req.Status ' not 2xx for request "' Method ":" Url '".'
 	catch
 		return "Spotify.ahk: HTTP request failed"
 }
