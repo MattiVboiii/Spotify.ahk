@@ -839,21 +839,27 @@ RunUpdateCheck(Manual := false) {
             return
         }
 
-        if CompareVersions(Release.version, App.Version) <= 0 {
+        Current := NormalizeVersion(App.Version)
+        Latest := NormalizeVersion(Release.version)
+        if Current = "" || Latest = "" {
             if Manual
-                MsgBox("You're on the latest version (" App.Version ").", "Spotify Volume", "Iconi")
+                MsgBox("Could not reach GitHub releases.", "Spotify Volume", "Icon!")
             return
         }
 
-        ; Startup: prompt once per remote version
-        if !Manual && Release.version = ReadLastSeenRelease()
+        ; Same or older remote → stay quiet (startup and tray)
+        if CompareVersions(Latest, Current) <= 0
             return
-        WriteLastSeenRelease(Release.version)
+
+        ; Startup: prompt once per remote version
+        if !Manual && Latest = ReadLastSeenRelease()
+            return
+        WriteLastSeenRelease(Latest)
 
         Answer := MsgBox(
             "A newer Spotify Volume is available.`n`n"
-            . "Current:  " App.Version "`n"
-            . "Latest:   " Release.version "`n`n"
+            . "Current:  " Current "`n"
+            . "Latest:   " Latest "`n`n"
             . "Open the release page?",
             "Spotify Volume", "YesNo Iconi"
         )
@@ -876,27 +882,48 @@ FetchLatestRelease() {
     Data := JSON.Load(Req.ResponseText)
     if !IsObject(Data) || !Data.HasOwnProp("tag_name")
         return false
-    Tag := Trim(String(Data.tag_name))
-    Tag := RegExReplace(Tag, "^[vV]", "")
+    Tag := NormalizeVersion(Data.tag_name)
     Url := Data.HasOwnProp("html_url") ? Trim(String(Data.html_url)) : ""
     if Url = ""
         Url := "https://github.com/" App.GitHubRepo "/releases/latest"
     return { version: Tag, url: Url }
 }
 
+NormalizeVersion(Value) {
+    Text := Trim(String(Value), " `t`r`n")
+    Text := RegExReplace(Text, "^\x{FEFF}")  ; BOM
+    Text := RegExReplace(Text, "^[vV]")
+    if RegExMatch(Text, "^(?<ver>\d+(?:\.\d+)*)", &Match)
+        return Match["ver"]
+    return Text
+}
+
 CompareVersions(A, B) {
-    AParts := StrSplit(RegExReplace(String(A), "^[vV]", ""), ".")
-    BParts := StrSplit(RegExReplace(String(B), "^[vV]", ""), ".")
+    A := NormalizeVersion(A)
+    B := NormalizeVersion(B)
+    if A = B
+        return 0
+    AParts := StrSplit(A, ".")
+    BParts := StrSplit(B, ".")
     MaxLen := Max(AParts.Length, BParts.Length)
     loop MaxLen {
-        Av := ToNumber(AParts.Has(A_Index) ? AParts[A_Index] : 0, 0)
-        Bv := ToNumber(BParts.Has(A_Index) ? BParts[A_Index] : 0, 0)
+        Av := VersionPart(AParts, A_Index)
+        Bv := VersionPart(BParts, A_Index)
         if Av < Bv
             return -1
         if Av > Bv
             return 1
     }
     return 0
+}
+
+VersionPart(Parts, Index) {
+    if Index < 1 || Index > Parts.Length
+        return 0
+    Part := Parts[Index]
+    if !IsInteger(Part)
+        return 0
+    return Integer(Part)
 }
 
 UpdateStatePath() {
@@ -908,20 +935,20 @@ UpdateStatePath() {
 
 ReadLastSeenRelease() {
     try
-        return Trim(IniRead(UpdateStatePath(), "Updates", "LastSeenRelease", ""))
+        return NormalizeVersion(IniRead(UpdateStatePath(), "Updates", "LastSeenRelease", ""))
     catch
         return ""
 }
 
 WriteLastSeenRelease(Version) {
-    try IniWrite(Version, UpdateStatePath(), "Updates", "LastSeenRelease")
+    try IniWrite(NormalizeVersion(Version), UpdateStatePath(), "Updates", "LastSeenRelease")
 }
 
 ReadAppVersion() {
     try {
-        Version := Trim(FileRead(A_ScriptDir "\VERSION"))
+        Version := NormalizeVersion(FileRead(A_ScriptDir "\VERSION"))
         if Version != ""
-            return RegExReplace(Version, "^[vV]", "")
+            return Version
     }
     return "0.0.0"
 }
